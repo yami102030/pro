@@ -383,12 +383,14 @@
             const loadData = async () => {
                 setIsLoading(true);
                 try {
+                    // 優化：只抓取不重複的 quarter 列表，而不是把全部設定抓回來
                     const { data: allSettingsQs } = await fetchAllData(() => supabase.from('member_quarter_settings').select('quarter'));
                     const [
                         { data: mData }, { data: pData }, { data: mpData }, { data: qsData }, { data: sysSettingsData } 
                     ] = await Promise.all([
                         fetchAllData(() => supabase.from('members').select('*').order('name')),
                         fetchAllData(() => supabase.from('positions').select('*').order('id')),
+                        // 優化：精準過濾，只抓取當前檢視季度的資料
                         fetchAllData(() => supabase.from('member_positions').select('*').eq('quarter', viewQuarter)),
                         fetchAllData(() => supabase.from('member_quarter_settings').select('*').eq('quarter', viewQuarter)),
                         fetchAllData(() => supabase.from('member_quarter_settings').select('*').eq('quarter', 'SYSTEM'))
@@ -1071,16 +1073,38 @@
             const [sortConfig, setSortConfig] = useState({ key: 'totalService', direction: 'desc' });
             const [selectedPersonalStats, setSelectedPersonalStats] = useState(null);
 
+            // 輔助函數：計算該季度的起始與結束日期，用於精準抓取 schedules 表
+            const getQuarterDateRange = (y, q) => {
+                const startMonth = (q - 1) * 3;
+                const startDate = new Date(y, startMonth, 1);
+                const endDate = new Date(y, startMonth + 3, 0); // 下個月的第0天等於這個月的最後一天
+                
+                // 格式化為 YYYY-MM-DD
+                const format = (d) => {
+                    const yyyy = d.getFullYear();
+                    const mm = String(d.getMonth() + 1).padStart(2, '0');
+                    const dd = String(d.getDate()).padStart(2, '0');
+                    return `${yyyy}-${mm}-${dd}`;
+                };
+                
+                return { start: format(startDate), end: format(endDate) };
+            };
+
             useEffect(() => { 
                 const fetchInitialData = async () => {
                     setIsLoading(true);
                     try {
+                        const currentQuarterStr = `${year}-Q${quarter}`;
+                        const dateRange = getQuarterDateRange(year, quarter);
+
                         const [{ data: members }, { data: positions }, { data: memberPositions }, { data: schedules }, { data: quarterSettings }] = await Promise.all([
                             fetchAllData(() => supabase.from('members').select('*')),
                             fetchAllData(() => supabase.from('positions').select('*')),
-                            fetchAllData(() => supabase.from('member_positions').select('*')),
-                            fetchAllData(() => supabase.from('schedules').select('*')),
-                            fetchAllData(() => supabase.from('member_quarter_settings').select('*'))
+                            // 優化：只抓取當前季度的崗位資格與設定
+                            fetchAllData(() => supabase.from('member_positions').select('*').eq('quarter', currentQuarterStr)),
+                            // 優化：只抓取這個季度的排班資料 (透過日期範圍過濾)
+                            fetchAllData(() => supabase.from('schedules').select('*').gte('service_date', dateRange.start).lte('service_date', dateRange.end)),
+                            fetchAllData(() => supabase.from('member_quarter_settings').select('*').in('quarter', [currentQuarterStr, 'SYSTEM']))
                         ]);
                         setDbData({ 
                             members: members || [], positions: positions || [], memberPositions: memberPositions || [], 
@@ -1090,7 +1114,7 @@
                     finally { setIsLoading(false); }
                 };
                 fetchInitialData(); 
-            }, []);
+            }, [year, quarter]); // 將 year 與 quarter 加入依賴，確保切換年份季度時重新抓取對應資料
 
             // 在切換大選單時，重置排班狀態，避免畫面錯亂
             useEffect(() => {
@@ -1148,7 +1172,12 @@
                 setIsLoading(true);
                 try {
                     const qY = queryYear; const qQ = queryQuarter; setYear(qY); setQuarter(qQ);
-                    const [{ data: latestSchedules }] = await Promise.all([ fetchAllData(() => supabase.from('schedules').select('*')) ]);
+                    const dateRange = getQuarterDateRange(qY, qQ);
+                    
+                    // 優化：只抓取目標季度的排班表
+                    const [{ data: latestSchedules }] = await Promise.all([ 
+                        fetchAllData(() => supabase.from('schedules').select('*').gte('service_date', dateRange.start).lte('service_date', dateRange.end)) 
+                    ]);
                     setDbData(prev => ({ ...prev, existingSchedules: latestSchedules || [] }));
 
                     const reconstructed = [];
