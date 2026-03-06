@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>TBC Serve Manager 系統</title>
+    <title>TBC Serve Manager</title>
     
     <!-- 外部排班引擎 (保留第一支程式的設定) -->
     <script src="scheduler.js"></script>
@@ -109,7 +109,6 @@
         // ==========================================
         // 無限制分頁抓取引擎 (fetchAllData)
         // ==========================================
-        // 自動處理 Supabase 單次 1000 筆的上限，確保所有歷史排班資料完整載入
         const fetchAllData = async (queryFn) => {
             let allData = [];
             let from = 0;
@@ -124,9 +123,9 @@
                     if (data && data.length > 0) {
                         allData = [...allData, ...data];
                         if (data.length < pageSize) {
-                            hasMore = false; // 已抓完最後一頁
+                            hasMore = false; 
                         } else {
-                            from += pageSize; // 準備抓取下一頁
+                            from += pageSize; 
                         }
                     } else {
                         hasMore = false;
@@ -224,19 +223,19 @@
             return null; 
         };
 
-        // 共用統計卡片組件
-        const StatCard = ({ icon: Icon, title, value, unit, iconBgClass, iconTextClass, trend = null }) => (
-            <div className="bg-white p-5 lg:p-6 rounded-3xl shadow-sm border border-slate-100 flex flex-col justify-between hover:shadow-md transition-all relative overflow-hidden">
-                <div className="flex justify-between items-start mb-4 relative z-10">
-                    <div className={`${iconBgClass} p-3 rounded-2xl ${iconTextClass}`}><Icon size={22} strokeWidth={2.5}/></div>
+        // 共用統計卡片組件 (支援緊湊模式)
+        const StatCard = ({ icon: Icon, title, value, unit, iconBgClass, iconTextClass, trend = null, compact = false }) => (
+            <div className={`bg-white ${compact ? 'p-4 lg:p-5' : 'p-5 lg:p-6'} rounded-3xl shadow-sm border border-slate-100 flex flex-col justify-between hover:shadow-md transition-all relative overflow-hidden`}>
+                <div className={`flex justify-between items-start ${compact ? 'mb-3' : 'mb-4'} relative z-10`}>
+                    <div className={`${iconBgClass} ${compact ? 'p-2.5 rounded-xl' : 'p-3 rounded-2xl'} ${iconTextClass}`}><Icon size={compact ? 18 : 22} strokeWidth={2.5}/></div>
                     {trend && <div className="text-[11px] font-bold text-slate-400 bg-slate-50 px-2 py-1 rounded-lg">{trend}</div>}
                 </div>
                 <div className="relative z-10">
-                    <p className="text-[13px] font-bold text-slate-500 mb-1">{title}</p>
-                    <p className="text-3xl font-black text-slate-800 tracking-tight">{value} <span className="text-sm font-bold text-slate-400 ml-1">{unit}</span></p>
+                    <p className={`${compact ? 'text-xs' : 'text-[13px]'} font-bold text-slate-500 mb-1`}>{title}</p>
+                    <p className={`${compact ? 'text-2xl' : 'text-3xl'} font-black text-slate-800 tracking-tight`}>{value} <span className="text-sm font-bold text-slate-400 ml-1">{unit}</span></p>
                 </div>
                 <div className={`absolute -bottom-6 -right-6 opacity-[0.03] scale-150 ${iconTextClass}`}>
-                    <Icon size={100} />
+                    <Icon size={compact ? 80 : 100} />
                 </div>
             </div>
         );
@@ -1576,7 +1575,18 @@
                     else if (d.totalService >= avgService + stdDev) d.healthStatus = 'warning';
                     else d.healthStatus = 'healthy';
                 });
-                return { totalMembers, totalServices, avgService: avgService.toFixed(1), avgAttendance: avgAttendance.toFixed(1), stdDev: stdDev.toFixed(2), maxService, highRiskMembers, attentionMembers, multiRoleRatio, roleCounts };
+
+                // 計算天數與次數分布圖的數據
+                const attendanceDistObj = {};
+                const serviceDistObj = {};
+                dashboardData.forEach(d => {
+                    attendanceDistObj[d.attendance] = (attendanceDistObj[d.attendance] || 0) + 1;
+                    serviceDistObj[d.totalService] = (serviceDistObj[d.totalService] || 0) + 1;
+                });
+                const maxAttCount = Math.max(0, ...Object.values(attendanceDistObj));
+                const maxSrvCount = Math.max(0, ...Object.values(serviceDistObj));
+
+                return { totalMembers, totalServices, avgService: avgService.toFixed(1), avgAttendance: avgAttendance.toFixed(1), stdDev: stdDev.toFixed(2), maxService, highRiskMembers, attentionMembers, multiRoleRatio, roleCounts, attendanceDistObj, serviceDistObj, maxAttCount, maxSrvCount };
             }, [dashboardData]);
 
             const sortedDashboardData = useMemo(() => {
@@ -1602,12 +1612,56 @@
                 if (!dashboardStats) return null;
                 return (
                     <div className="h-full overflow-y-auto custom-scrollbar p-6 lg:p-8 animate-fade-in pb-20 bg-slate-50">
-                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-                            <StatCard icon={Users} title="排班總人數" value={dashboardStats.totalMembers} unit="人" iconBgClass="bg-indigo-50" iconTextClass="text-indigo-600" />
-                            <StatCard icon={Layers} title="平均服事次數" value={dashboardStats.avgService} unit="次/季" iconBgClass="bg-emerald-50" iconTextClass="text-emerald-600" />
-                            <StatCard icon={CalendarDays} title="平均出席天數" value={dashboardStats.avgAttendance} unit="天/季" iconBgClass="bg-sky-50" iconTextClass="text-sky-600" />
-                            <StatCard icon={TrendingUp} title="最高服事紀錄" value={dashboardStats.maxService} unit="次" iconBgClass="bg-rose-50" iconTextClass="text-rose-600" />
+                        <div className="flex flex-col xl:flex-row gap-6 mb-8">
+                            {/* 2x2 卡片 */}
+                            <div className="grid grid-cols-2 gap-4 xl:w-[400px] shrink-0">
+                                <StatCard compact icon={Users} title="排班總人數" value={dashboardStats.totalMembers} unit="人" iconBgClass="bg-indigo-50" iconTextClass="text-indigo-600" />
+                                <StatCard compact icon={TrendingUp} title="最高服事次數" value={dashboardStats.maxService} unit="次" iconBgClass="bg-rose-50" iconTextClass="text-rose-600" />
+                                <StatCard compact icon={Layers} title="平均服事次數" value={dashboardStats.avgService} unit="次/季" iconBgClass="bg-emerald-50" iconTextClass="text-emerald-600" />
+                                <StatCard compact icon={CalendarDays} title="平均出席天數" value={dashboardStats.avgAttendance} unit="天/季" iconBgClass="bg-sky-50" iconTextClass="text-sky-600" />
+                            </div>
+                            
+                            {/* 柱狀圖 */}
+                            <div className="flex-1 flex flex-col sm:flex-row gap-4 overflow-hidden">
+                                <div className="bg-white p-5 rounded-[2rem] shadow-sm border border-slate-100 flex-1 flex flex-col min-h-[160px]">
+                                    <h4 className="text-[13px] font-black text-slate-500 mb-3 flex items-center gap-1.5"><BarChart3 size={14} className="text-sky-500"/> 服事天數分布圖</h4>
+                                    <div className="flex-1 overflow-y-auto custom-scrollbar space-y-2.5 pr-2">
+                                        {Object.keys(dashboardStats.attendanceDistObj).map(Number).sort((a,b)=>a-b).map(k => {
+                                            const count = dashboardStats.attendanceDistObj[k];
+                                            const pct = dashboardStats.maxAttCount > 0 ? (count / dashboardStats.maxAttCount) * 100 : 0;
+                                            return (
+                                                <div key={k} className="flex items-center gap-2">
+                                                    <div className="w-10 text-right font-bold text-slate-500 text-[11px] shrink-0">{k} 天</div>
+                                                    <div className="flex-1 flex items-center h-5">
+                                                        <div className="h-full bg-sky-400 rounded-r-md transition-all" style={{ width: `${pct}%`, minWidth: count > 0 ? '4px' : '0' }}></div>
+                                                        <span className="ml-2 font-black text-slate-600 text-[11px]">{count} 人</span>
+                                                    </div>
+                                                </div>
+                                            )
+                                        })}
+                                    </div>
+                                </div>
+                                <div className="bg-white p-5 rounded-[2rem] shadow-sm border border-slate-100 flex-1 flex flex-col min-h-[160px]">
+                                    <h4 className="text-[13px] font-black text-slate-500 mb-3 flex items-center gap-1.5"><BarChart3 size={14} className="text-emerald-500"/> 服事次數分布圖</h4>
+                                    <div className="flex-1 overflow-y-auto custom-scrollbar space-y-2.5 pr-2">
+                                        {Object.keys(dashboardStats.serviceDistObj).map(Number).sort((a,b)=>a-b).map(k => {
+                                            const count = dashboardStats.serviceDistObj[k];
+                                            const pct = dashboardStats.maxSrvCount > 0 ? (count / dashboardStats.maxSrvCount) * 100 : 0;
+                                            return (
+                                                <div key={k} className="flex items-center gap-2">
+                                                    <div className="w-10 text-right font-bold text-slate-500 text-[11px] shrink-0">{k} 次</div>
+                                                    <div className="flex-1 flex items-center h-5">
+                                                        <div className="h-full bg-emerald-400 rounded-r-md transition-all" style={{ width: `${pct}%`, minWidth: count > 0 ? '4px' : '0' }}></div>
+                                                        <span className="ml-2 font-black text-slate-600 text-[11px]">{count} 人</span>
+                                                    </div>
+                                                </div>
+                                            )
+                                        })}
+                                    </div>
+                                </div>
+                            </div>
                         </div>
+                        
                         <div className="bg-white rounded-[2rem] shadow-sm border border-slate-100 overflow-hidden mb-8 flex flex-col max-h-[600px]">
                             <div className="p-6 lg:px-8 border-b border-slate-100 bg-slate-50 flex items-center justify-between sticky top-0">
                                 <h3 className="text-lg font-black text-slate-800">同工排班分析表</h3>
