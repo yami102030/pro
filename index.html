@@ -1513,26 +1513,60 @@
                 const members = dbData.members || [];
                 if (!schedules.length || !members.length) return null;
 
-                // 1. 歷季平均服事次數 (Quarterly Table with YoY & QoQ/MoM)
+                // 1. 歷季平均服事次數 / 天數 / 人數 (Quarterly Tables with YoY & QoQ/MoM)
                 const quarterStats = {};
                 schedules.forEach(s => {
                     if (!s.service_date) return;
-                    const d = new Date(s.service_date);
-                    const y = d.getFullYear();
-                    const q = Math.floor(d.getMonth() / 3) + 1;
+                    
+                    // 【重要修正】全面棄用 new Date() 避免時區偏移跑到上一個月
+                    // 直接透過字串分割萃取 年、月
+                    const parts = s.service_date.includes('-') ? s.service_date.split('-') : s.service_date.split('/');
+                    if (parts.length < 2) return;
+                    
+                    const y = parseInt(parts[0], 10);
+                    const m = parseInt(parts[1], 10); // 1-12
+                    const q = Math.ceil(m / 3);       // 例如 4月: Math.ceil(4/3) = 2 (Q2)
+                    
                     const key = `${y}Q${q}`;
                     if (!quarterStats[key]) {
-                        quarterStats[key] = { year: y, quarter: q, schedules: [], uniqueMembers: new Set() };
+                        quarterStats[key] = { year: y, quarter: q, schedules: [], uniqueMembers: new Set(), dates: {} };
                     }
                     quarterStats[key].schedules.push(s);
                     quarterStats[key].uniqueMembers.add(s.member_id);
+                    
+                    // 為了計算天數與人數，先用日期作為 Key 將當日服事名單匯聚
+                    if (!quarterStats[key].dates[s.service_date]) {
+                        quarterStats[key].dates[s.service_date] = new Set();
+                    }
+                    quarterStats[key].dates[s.service_date].add(s.member_id);
                 });
 
                 const quarterlyData = Object.keys(quarterStats).map(key => {
                     const stat = quarterStats[key];
-                    const avg = stat.uniqueMembers.size === 0 ? 0 : stat.schedules.length / stat.uniqueMembers.size;
-                    return { key, year: stat.year, quarter: stat.quarter, avg };
+                    const uniqueMembersCount = stat.uniqueMembers.size;
+                    
+                    // 指標1：平均服事次數 (總班次 / 不重複人數)
+                    const avgServiceCount = uniqueMembersCount === 0 ? 0 : stat.schedules.length / uniqueMembersCount;
+                    
+                    // 指標2：平均服事天數 (加總每個人的服事天數 / 不重複人數)
+                    let totalPersonDays = 0;
+                    Object.values(stat.dates).forEach(membersSet => {
+                        totalPersonDays += membersSet.size;
+                    });
+                    const avgServiceDays = uniqueMembersCount === 0 ? 0 : totalPersonDays / uniqueMembersCount;
+
+                    // 指標3：平均服事人數 (單日平均不重複服事人數：總服事人次 / 季度的有排班的天數)
+                    const totalSundays = Object.keys(stat.dates).length;
+                    const avgPeoplePerDay = totalSundays === 0 ? 0 : totalPersonDays / totalSundays;
+
+                    return { key, year: stat.year, quarter: stat.quarter, avgServiceCount, avgServiceDays, avgPeoplePerDay };
                 }).sort((a, b) => b.year !== a.year ? b.year - a.year : b.quarter - a.quarter);
+
+                const calcPct = (curr, prev) => {
+                    if (prev === null || prev === undefined) return null;
+                    if (prev === 0) return curr > 0 ? 100 : 0;
+                    return ((curr - prev) / prev) * 100;
+                };
 
                 const quarterlyTable = quarterlyData.map(d => {
                     const prevQ_Y = d.quarter === 1 ? d.year - 1 : d.year;
@@ -1543,16 +1577,14 @@
                     const prevQData = quarterlyData.find(x => x.key === prevQKey);
                     const prevYData = quarterlyData.find(x => x.key === prevYKey);
 
-                    const calcPct = (curr, prev) => {
-                        if (!prev) return null;
-                        if (prev.avg === 0) return curr > 0 ? 100 : 0;
-                        return ((curr - prev.avg) / prev.avg) * 100;
-                    };
-
                     return {
                         ...d,
-                        qoq: calcPct(d.avg, prevQData),
-                        yoy: calcPct(d.avg, prevYData)
+                        count_qoq: calcPct(d.avgServiceCount, prevQData?.avgServiceCount),
+                        count_yoy: calcPct(d.avgServiceCount, prevYData?.avgServiceCount),
+                        days_qoq: calcPct(d.avgServiceDays, prevQData?.avgServiceDays),
+                        days_yoy: calcPct(d.avgServiceDays, prevYData?.avgServiceDays),
+                        people_qoq: calcPct(d.avgPeoplePerDay, prevQData?.avgPeoplePerDay),
+                        people_yoy: calcPct(d.avgPeoplePerDay, prevYData?.avgPeoplePerDay)
                     };
                 });
 
@@ -1616,173 +1648,57 @@
                 };
             }, [dbData.existingSchedules, dbData.members]);
 
-            const renderSchedulingView = () => {
-                if (schedulingPhase === 'setup') {
-                    return (
-                        <div className="flex-1 flex items-center justify-center bg-slate-100 p-6 animate-fade-in overflow-y-auto">
-                            <div className="w-full max-w-xl bg-white p-10 lg:p-12 rounded-[3rem] shadow-sm border border-slate-200">
-                                <div className="text-center mb-10">
-                                    <div className="w-16 h-16 bg-indigo-100 text-indigo-600 rounded-2xl flex items-center justify-center mx-auto mb-4"><Calendar size={32} /></div>
-                                    <h2 className="text-3xl font-black text-slate-900 tracking-tight mb-2">排班作業</h2>
-                                </div>
-                                <div className="flex bg-slate-100 p-1.5 rounded-2xl mb-8">
-                                    <button onClick={() => setAppMode('schedule')} className={`flex-1 py-3.5 flex items-center justify-center gap-2 text-sm font-black rounded-xl transition-all ${appMode === 'schedule' ? 'bg-white text-indigo-600 shadow-md' : 'text-slate-400 hover:text-slate-600 hover:bg-slate-200/50'}`}><Play size={18} /> 預排作業</button>
-                                    <button onClick={() => setAppMode('query')} className={`flex-1 py-3.5 flex items-center justify-center gap-2 text-sm font-black rounded-xl transition-all ${appMode === 'query' ? 'bg-white text-indigo-600 shadow-md' : 'text-slate-400 hover:text-slate-600 hover:bg-slate-200/50'}`}><Search size={18} /> 編輯班表</button>
-                                </div>
-                                {appMode === 'schedule' ? (
-                                    <div className="animate-fade-in">
-                                        <div className="grid grid-cols-2 gap-6 mb-10">
-                                            <div className="space-y-2">
-                                                <label className="text-xs font-black text-slate-400 ml-2">年份</label>
-                                                <input type="number" value={year} onChange={e => setYear(parseInt(e.target.value))} className="w-full bg-slate-50 border border-slate-200 rounded-3xl px-6 py-5 font-bold focus:ring-4 focus:ring-indigo-50 focus:bg-white outline-none transition-all" />
-                                            </div>
-                                            <div className="space-y-2">
-                                                <label className="text-xs font-black text-slate-400 ml-2">季度</label>
-                                                <select value={quarter} onChange={e => setQuarter(parseInt(e.target.value))} className="w-full bg-slate-50 border border-slate-200 rounded-3xl px-6 py-5 font-bold focus:ring-4 focus:ring-indigo-50 focus:bg-white outline-none transition-all">
-                                                    <option value={1}>Q1 (1-3月)</option><option value={2}>Q2 (4-6月)</option><option value={3}>Q3 (7-9月)</option><option value={4}>Q4 (10-12月)</option>
-                                                </select>
-                                            </div>
-                                        </div>
-                                        <button onClick={runAutoSchedule} disabled={isLoading} className="w-full bg-slate-900 hover:bg-black disabled:bg-slate-300 text-white font-black py-5 rounded-2xl flex items-center justify-center gap-3 transition-all active:scale-95 shadow-xl">
-                                            {isLoading ? <RefreshCw className="animate-spin" /> : <><Play size={20} fill="currentColor"/> 建立新班表</>}
-                                        </button>
-                                    </div>
-                                ) : (
-                                    <div className="animate-fade-in">
-                                        <div className="grid grid-cols-2 gap-6 mb-10">
-                                            <div className="space-y-2">
-                                                <label className="text-xs font-black text-slate-400 ml-2">年份</label>
-                                                <input type="number" value={queryYear} onChange={e => setQueryYear(parseInt(e.target.value))} className="w-full bg-slate-50 border border-slate-200 rounded-3xl px-6 py-5 font-bold focus:ring-4 focus:ring-indigo-50 focus:bg-white outline-none transition-all" />
-                                            </div>
-                                            <div className="space-y-2">
-                                                <label className="text-xs font-black text-slate-400 ml-2">季度</label>
-                                                <select value={queryQuarter} onChange={e => setQueryQuarter(parseInt(e.target.value))} className="w-full bg-slate-50 border border-slate-200 rounded-3xl px-6 py-5 font-bold focus:ring-4 focus:ring-indigo-50 focus:bg-white outline-none transition-all">
-                                                    <option value={1}>Q1 (1-3月)</option><option value={2}>Q2 (4-6月)</option><option value={3}>Q3 (7-9月)</option><option value={4}>Q4 (10-12月)</option>
-                                                </select>
-                                            </div>
-                                        </div>
-                                        <button onClick={runQuerySchedule} disabled={isLoading} className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-300 text-white font-black py-5 rounded-2xl flex items-center justify-center gap-3 transition-all active:scale-95 shadow-xl shadow-indigo-200">
-                                            {isLoading ? <RefreshCw className="animate-spin" /> : <><Search size={20} strokeWidth={3}/> 開始編輯</>}
-                                        </button>
-                                    </div>
-                                )}
-                            </div>
-                        </div>
-                    );
-                }
-
-                const tableData = {};
-                generatedDraft.forEach(d => {
-                    const key = `${d.service_date}_${d.session}`;
-                    if (!tableData[key]) tableData[key] = { date: d.service_date, session: d.session, positions: {} };
-                    if (!tableData[key].positions[d._positionName]) tableData[key].positions[d._positionName] = [];
-                    tableData[key].positions[d._positionName].push(d);
-                });
-                const groupedBySession = Object.values(tableData).sort((a, b) => a.session !== b.session ? a.session.localeCompare(b.session) : a.date.localeCompare(b.date)).reduce((acc, row) => {
-                    if (!acc[row.session]) acc[row.session] = []; acc[row.session].push(row); return acc;
-                }, {});
-                const rowsToDisplay = groupedBySession[activeSessionTab] || [];
-
-                const getTagClass = (item) => {
-                    let cls = `name-tag ${activeSlot?.temp_id === item.temp_id ? 'active' : ''}`;
-                    if (item.is_empty) return cls + ' empty-slot';
-                    if (item._positionName !== '執事輪值') {
-                        if (conflictIds.has(item.temp_id)) return cls + ' conflict';
-                        if (orphanIds.has(item.temp_id)) return cls + ' orphan';
-                    }
-                    if (item.is_emergency) return cls + ' emergency';
-                    return cls;
-                };
-
-                const ScheduleCell = ({ row, positionName, gridCols = 1 }) => {
-                    const items = row.positions[positionName] || [];
-                    const gridClass = gridCols > 1 ? `grid grid-cols-${gridCols} gap-x-2 gap-y-0.5` : 'flex flex-col gap-0';
-                    return (
-                        <td>
-                            <div className={`${gridClass} min-h-[34px] w-max mx-auto`}>
-                                {items.map((item, i) => (
-                                    <div key={item.temp_id} draggable={!item.is_empty} onDragStart={(e) => handleDragStart(e, item)} onDragEnd={handleDragEnd} onDragOver={(e) => e.preventDefault()} onDrop={(e) => handleDrop(e, row.date, row.session, positionName, i)} onClick={() => { setActiveSlot(item); setSearchTerm(''); }} className={getTagClass(item)}>
-                                        {item._memberName}
-                                    </div>
-                                ))}
-                            </div>
-                        </td>
-                    );
-                };
-
-                return (
-                    <div className="flex-1 flex flex-col overflow-hidden animate-fade-in bg-slate-50">
-                        <div className="p-6 lg:px-8 lg:py-6 bg-white border-b border-slate-200 shrink-0 flex flex-col xl:flex-row justify-between items-start xl:items-center gap-4 shadow-sm z-10">
-                            <div>
-                                <div className="flex items-center gap-3 mb-1">
-                                    <button onClick={() => { setSchedulingPhase('setup'); setActiveSlot(null); }} className="text-slate-400 hover:text-indigo-600 transition-colors p-1 rounded hover:bg-slate-50" title="返回上一頁"><ChevronLeft size={24} /></button>
-                                    <h2 className="text-2xl font-black text-slate-900 flex items-center gap-3 tracking-tight">{year}Q{quarter} {appMode === 'schedule' ? '預排預覽' : '編輯預覽'}</h2>
-                                </div>
-                                <div className="mt-3 flex flex-wrap items-center gap-6 ml-10">
-                                    <p className="text-slate-500 text-xs font-bold flex items-center gap-1.5"><Search size={14} className="text-indigo-500"/> 點擊姓名選擇合適替代人選</p>
-                                    <p className="text-slate-500 text-xs font-bold flex items-center gap-1.5"><GripVertical size={14} className="text-indigo-500"/> 拖曳姓名可交換位置</p>
-                                </div>
-                                <div className="flex gap-3 mt-2 pt-2 border-t border-slate-100 flex-wrap ml-10">
-                                    <p className="text-rose-600 text-[10px] font-black flex items-center gap-1.5 bg-rose-50 px-2 py-1 rounded"><span className="w-2 h-2 rounded-full bg-rose-500"></span> 紅色：崗位兼任</p>
-                                    <p className="text-sky-600 text-[10px] font-black flex items-center gap-1.5 bg-sky-50 px-2 py-1 rounded"><span className="w-2 h-2 rounded-full bg-sky-500"></span> 藍色：群組落單</p>
-                                    {appMode === 'schedule' && <p className="text-orange-600 text-[10px] font-black flex items-center gap-1.5 bg-orange-50 px-2 py-1 rounded"><span className="w-2 h-2 rounded-full bg-orange-500"></span> 橘色：落單自動替換</p>}
-                                </div>
-                            </div>
-                            <div className="flex flex-col items-end gap-3 mt-4 xl:mt-0 w-full xl:w-auto">
-                                <div className="flex items-center gap-3 flex-wrap justify-end">
-                                    <div className="flex bg-slate-100 p-1.5 rounded-2xl w-full md:w-auto overflow-x-auto custom-scrollbar shadow-inner border border-slate-200">
-                                        {['第一堂', '第二堂'].map(tab => (
-                                            <button key={tab} onClick={() => { setActiveSessionTab(tab); setActiveSlot(null); }} className={`px-5 py-2 rounded-xl text-sm font-black transition-all whitespace-nowrap ${activeSessionTab === tab ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700 hover:bg-slate-200/50'}`}>{tab}</button>
-                                        ))}
-                                        {appMode === 'schedule' && (
-                                            <>
-                                                <div className="w-px h-6 bg-slate-300 mx-2 self-center"></div>
-                                                <button onClick={runAutoSchedule} disabled={isLoading} className="px-4 py-2 rounded-xl text-sm font-black transition-all whitespace-nowrap text-indigo-600 hover:bg-white hover:shadow-sm flex items-center gap-1.5"><RefreshCw size={16} className={isLoading ? "animate-spin" : ""} /> 重新排班</button>
-                                            </>
-                                        )}
-                                    </div>
-                                    <div className="flex bg-slate-100 p-1.5 rounded-2xl w-full md:w-auto overflow-x-auto custom-scrollbar shadow-inner border border-slate-200">
-                                        <button onClick={exportToCSV} className="px-4 py-2 rounded-xl text-sm font-black transition-all whitespace-nowrap text-emerald-600 hover:bg-white hover:shadow-sm flex items-center gap-1.5"><Download size={16} /> 匯出 CSV</button>
-                                        <button onClick={handlePublishClick} disabled={isSaving} className="px-4 py-2 rounded-xl text-sm font-black transition-all whitespace-nowrap bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm flex items-center gap-1.5 disabled:bg-indigo-400">{isSaving ? <RefreshCw className="animate-spin" size={16} /> : <><Save size={16}/> 發布班表</>}</button>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                        <div className="flex-1 flex flex-col lg:flex-row overflow-hidden relative">
-                            <div className="flex-1 flex flex-col h-full relative overflow-hidden">
-                                <div className="flex flex-col h-full bg-slate-50 relative">
-                                    <div className="overflow-x-auto shadow-inner bg-slate-50/50 custom-scrollbar flex-1 p-6 relative">
-                                        <table className="w-max schedule-table border-collapse min-w-full mx-auto bg-white rounded-2xl overflow-hidden shadow-sm">
-                                            <thead>
-                                                <tr>
-                                                    <th className="sticky left-0 z-20 bg-slate-200/95 backdrop-blur whitespace-nowrap text-center px-4 w-[110px]">日期</th>
-                                                    <th className="whitespace-nowrap">司會</th><th className="whitespace-nowrap">執事</th><th className="whitespace-nowrap">接待</th>
-                                                    <th className="whitespace-nowrap">收奉獻</th><th className="whitespace-nowrap">主餐</th><th className="whitespace-nowrap">PPT</th><th className="whitespace-nowrap">新朋友關懷</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                                {rowsToDisplay.length > 0 ? (
-                                                    rowsToDisplay.map((row, idx) => {
-                                                        const isEven = idx % 2 === 0; const rowBg = isEven ? 'bg-white' : 'bg-slate-50/50'; const stickyBg = isEven ? 'bg-white/95' : 'bg-slate-50/95';
-                                                        return (
-                                                            <tr key={idx} className={rowBg}>
-                                                                <td className={`sticky left-0 z-10 font-bold text-slate-500 text-center whitespace-nowrap px-4 backdrop-blur-sm border-r border-slate-100 ${stickyBg}`}>{row.date}</td>
-                                                                <ScheduleCell row={row} positionName="司會" /><ScheduleCell row={row} positionName="執事輪值" /><ScheduleCell row={row} positionName="接待" gridCols={2} />
-                                                                <ScheduleCell row={row} positionName="收奉獻" gridCols={2} /><ScheduleCell row={row} positionName="主餐" gridCols={2} /><ScheduleCell row={row} positionName="PPT" /><ScheduleCell row={row} positionName="新朋友關懷" gridCols={2} />
-                                                            </tr>
-                                                        );
-                                                    })
-                                                ) : (<tr><td colSpan="8" className="text-center py-16 text-slate-400 font-bold bg-white">此堂別尚無排班資料</td></tr>)}
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                </div>
-                            </div>
-                            {activeSlot && renderRecommendationPanel()}
-                        </div>
+            // 定義子視圖供數據洞察使用
+            const renderTableBlock = (title, icon, colorBg, colorText, data, valKey, yoyKey, qoqKey, unit, valLabel) => (
+                <div className="bg-white rounded-[2rem] shadow-sm border border-slate-100 overflow-hidden flex flex-col h-full">
+                    <div className={`p-5 border-b border-slate-100 ${colorBg} flex items-center gap-2 shrink-0`}>
+                        {icon}
+                        <h3 className={`text-lg font-black ${colorText}`}>{title}</h3>
                     </div>
-                );
-            };
+                    <div className="p-0 overflow-x-auto flex-1 custom-scrollbar max-h-[300px]">
+                        <table className="w-full text-left border-collapse min-w-[320px]">
+                            <thead>
+                                <tr className="bg-slate-50 sticky top-0 z-10 shadow-sm">
+                                    <th className="py-3 px-5 font-black text-slate-500 text-[13px] border-b border-slate-200 w-1/4">年/季</th>
+                                    <th className="py-3 px-5 font-black text-slate-500 text-[13px] border-b border-slate-200 text-center w-1/4">{valLabel}</th>
+                                    <th className="py-3 px-5 font-black text-slate-500 text-[13px] border-b border-slate-200 text-center w-1/4">YoY(%)</th>
+                                    <th className="py-3 px-5 font-black text-slate-500 text-[13px] border-b border-slate-200 text-center w-1/4">MoM(%)</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {data.length > 0 ? (
+                                    data.map((d) => (
+                                        <tr key={d.key} className="border-b border-slate-50 hover:bg-slate-50/50 transition-colors">
+                                            <td className="py-3 px-5 font-black text-slate-800">{d.key}</td>
+                                            <td className="py-3 px-5 text-center font-black text-slate-600">{d[valKey].toFixed(1)} <span className="text-[11px] text-slate-400 font-bold">{unit}</span></td>
+                                            <td className="py-3 px-5 text-center font-bold">
+                                                {d[yoyKey] !== null ? (
+                                                    <span className={d[yoyKey] > 0 ? "text-rose-500" : (d[yoyKey] < 0 ? "text-emerald-500" : "text-slate-400")}>
+                                                        {d[yoyKey] > 0 ? <ArrowUp size={14} className="inline mr-0.5"/> : (d[yoyKey] < 0 ? <ArrowDown size={14} className="inline mr-0.5"/> : '')}
+                                                        {Math.abs(d[yoyKey]).toFixed(1)}%
+                                                    </span>
+                                                ) : <span className="text-slate-300">-</span>}
+                                            </td>
+                                            <td className="py-3 px-5 text-center font-bold">
+                                                {d[qoqKey] !== null ? (
+                                                    <span className={d[qoqKey] > 0 ? "text-rose-500" : (d[qoqKey] < 0 ? "text-emerald-500" : "text-slate-400")}>
+                                                        {d[qoqKey] > 0 ? <ArrowUp size={14} className="inline mr-0.5"/> : (d[qoqKey] < 0 ? <ArrowDown size={14} className="inline mr-0.5"/> : '')}
+                                                        {Math.abs(d[qoqKey]).toFixed(1)}%
+                                                    </span>
+                                                ) : <span className="text-slate-300">-</span>}
+                                            </td>
+                                        </tr>
+                                    ))
+                                ) : (
+                                    <tr>
+                                        <td colSpan="4" className="text-center py-8 text-slate-400 font-bold">尚無排班數據</td>
+                                    </tr>
+                                )}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            );
 
             // ---- 全新的 Data Insights 頁面 ----
             const renderGovernanceView = () => {
@@ -1799,54 +1715,11 @@
                         </div>
                         <div className="flex-1 overflow-y-auto custom-scrollbar p-6 lg:p-8 space-y-6">
                             
-                            {/* 1. 季度平均服事次數 (包含 YoY / MoM 表格) */}
-                            <div className="bg-white rounded-[2rem] shadow-sm border border-slate-100 overflow-hidden">
-                                <div className="p-6 border-b border-slate-100 bg-indigo-50 flex items-center gap-2">
-                                    <Layers className="text-indigo-600" size={24} />
-                                    <h3 className="text-lg font-black text-indigo-800">歷季平均服事次數</h3>
-                                </div>
-                                <div className="p-0 overflow-x-auto">
-                                    <table className="w-full text-left border-collapse min-w-[500px]">
-                                        <thead>
-                                            <tr className="bg-slate-50">
-                                                <th className="py-4 px-6 font-black text-slate-500 text-sm border-b border-slate-100 w-1/4">年/季</th>
-                                                <th className="py-4 px-6 font-black text-slate-500 text-sm border-b border-slate-100 text-center w-1/4">次數 (每人)</th>
-                                                <th className="py-4 px-6 font-black text-slate-500 text-sm border-b border-slate-100 text-center w-1/4">YoY(%)</th>
-                                                <th className="py-4 px-6 font-black text-slate-500 text-sm border-b border-slate-100 text-center w-1/4">MoM(%)</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {insights.quarterlyTable.length > 0 ? (
-                                                insights.quarterlyTable.map((d, i) => (
-                                                    <tr key={d.key} className="border-b border-slate-50 hover:bg-slate-50/50 transition-colors">
-                                                        <td className="py-4 px-6 font-black text-slate-800">{d.key}</td>
-                                                        <td className="py-4 px-6 text-center font-black text-slate-600">{d.avg.toFixed(1)} 次</td>
-                                                        <td className="py-4 px-6 text-center font-bold">
-                                                            {d.yoy !== null ? (
-                                                                <span className={d.yoy > 0 ? "text-rose-500" : (d.yoy < 0 ? "text-emerald-500" : "text-slate-400")}>
-                                                                    {d.yoy > 0 ? <ArrowUp size={14} className="inline mr-1"/> : (d.yoy < 0 ? <ArrowDown size={14} className="inline mr-1"/> : '')}
-                                                                    {Math.abs(d.yoy).toFixed(1)}%
-                                                                </span>
-                                                            ) : <span className="text-slate-300">-</span>}
-                                                        </td>
-                                                        <td className="py-4 px-6 text-center font-bold">
-                                                            {d.qoq !== null ? (
-                                                                <span className={d.qoq > 0 ? "text-rose-500" : (d.qoq < 0 ? "text-emerald-500" : "text-slate-400")}>
-                                                                    {d.qoq > 0 ? <ArrowUp size={14} className="inline mr-1"/> : (d.qoq < 0 ? <ArrowDown size={14} className="inline mr-1"/> : '')}
-                                                                    {Math.abs(d.qoq).toFixed(1)}%
-                                                                </span>
-                                                            ) : <span className="text-slate-300">-</span>}
-                                                        </td>
-                                                    </tr>
-                                                ))
-                                            ) : (
-                                                <tr>
-                                                    <td colSpan="4" className="text-center py-8 text-slate-400 font-bold">尚無排班數據</td>
-                                                </tr>
-                                            )}
-                                        </tbody>
-                                    </table>
-                                </div>
+                            {/* 1. 三大指標區塊 (次數、天數、人數) */}
+                            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                                {renderTableBlock("平均服事次數", <Layers className="text-indigo-600" size={24} />, "bg-indigo-50", "text-indigo-800", insights.quarterlyTable, "avgServiceCount", "count_yoy", "count_qoq", "次", "次數")}
+                                {renderTableBlock("平均服事天數", <CalendarDays className="text-emerald-600" size={24} />, "bg-emerald-50", "text-emerald-800", insights.quarterlyTable, "avgServiceDays", "days_yoy", "days_qoq", "天", "天數")}
+                                {renderTableBlock("單日平均服事人數", <Users className="text-sky-600" size={24} />, "bg-sky-50", "text-sky-800", insights.quarterlyTable, "avgPeoplePerDay", "people_yoy", "people_qoq", "人", "人數")}
                             </div>
 
                             {/* 2. 過勞預警區塊 (PR90 & 連續三週以上) */}
@@ -1858,14 +1731,14 @@
                                     </div>
                                     <span className="text-xs font-bold text-rose-500 bg-rose-100/50 border border-rose-200 px-3 py-1 rounded-full w-max">PR90 ({insights.pr90Threshold}次) 且 連續服事 > 3 週</span>
                                 </div>
-                                <div className="p-0 overflow-x-auto">
+                                <div className="p-0 overflow-x-auto max-h-[350px] custom-scrollbar">
                                     {insights.burnoutMembers.length > 0 ? (
                                         <table className="w-full text-left border-collapse min-w-[500px]">
-                                            <thead>
+                                            <thead className="sticky top-0 shadow-sm z-10">
                                                 <tr className="bg-slate-50">
-                                                    <th className="py-4 px-6 font-black text-slate-500 text-sm border-b border-slate-100 w-1/3">同工姓名</th>
-                                                    <th className="py-4 px-6 font-black text-slate-500 text-sm border-b border-slate-100 text-center w-1/3">近90天服事次數</th>
-                                                    <th className="py-4 px-6 font-black text-slate-500 text-sm border-b border-slate-100 text-center w-1/3">連續服事週數</th>
+                                                    <th className="py-4 px-6 font-black text-slate-500 text-sm border-b border-slate-200 w-1/3">同工姓名</th>
+                                                    <th className="py-4 px-6 font-black text-slate-500 text-sm border-b border-slate-200 text-center w-1/3">近90天服事次數</th>
+                                                    <th className="py-4 px-6 font-black text-slate-500 text-sm border-b border-slate-200 text-center w-1/3">連續服事週數</th>
                                                 </tr>
                                             </thead>
                                             <tbody>
