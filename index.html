@@ -1065,6 +1065,7 @@
             
             const [activeSlot, setActiveSlot] = useState(null); 
             const [searchTerm, setSearchTerm] = useState('');
+            const [analysisSearchTerm, setAnalysisSearchTerm] = useState(''); // 新增：分析表專用搜尋狀態
             const [draggedItem, setDraggedItem] = useState(null);
             const [confirmDialog, setConfirmDialog] = useState({ isOpen: false, title: '', currentName: '', currentDate: '', currentRole: '', newName: '', newDate: '', newRole: '', type: '', onConfirm: null });
             const [publishConfirmOpen, setPublishConfirmOpen] = useState(false);
@@ -1151,6 +1152,15 @@
 
             // --- 核心邏輯 ---
             const runAutoSchedule = () => {
+                // 新增防呆：檢查目標季度是否已經建立同工資料
+                const targetQuarterStr = `${year}-Q${quarter}`;
+                const hasQuarterData = dbData.memberQuarterSettings.some(s => s.quarter === targetQuarterStr);
+                
+                if (!hasQuarterData) {
+                    setErrorMsg(`⚠️ 請先至左側選單「同工資料」建立【${targetQuarterStr.replace('-','')}】的季度資料，再進行預排！`);
+                    return;
+                }
+
                 setIsLoading(true);
                 setTimeout(() => {
                     try {
@@ -1621,6 +1631,13 @@
             const sortedDashboardData = useMemo(() => {
                 if (!dashboardData) return [];
                 let sortableItems = [...dashboardData];
+                
+                // 新增：姓名搜尋過濾邏輯
+                if (analysisSearchTerm) {
+                    const term = analysisSearchTerm.toLowerCase();
+                    sortableItems = sortableItems.filter(d => d.name.toLowerCase().includes(term));
+                }
+
                 sortableItems.sort((a, b) => {
                     let aValue = sortConfig.key === 'name' ? a.name : (sortConfig.key === 'totalService' ? a.totalService : (sortConfig.key === 'attendance' ? a.attendance : a.roles[sortConfig.key] || 0));
                     let bValue = sortConfig.key === 'name' ? b.name : (sortConfig.key === 'totalService' ? b.totalService : (sortConfig.key === 'attendance' ? b.attendance : b.roles[sortConfig.key] || 0));
@@ -1630,7 +1647,7 @@
                     return 0;
                 });
                 return sortableItems;
-            }, [dashboardData, sortConfig]);
+            }, [dashboardData, sortConfig, analysisSearchTerm]); // 依賴項加入 analysisSearchTerm
 
             const requestSort = (key) => {
                 let direction = 'desc'; if (sortConfig.key === key && sortConfig.direction === 'desc') direction = 'asc';
@@ -1692,8 +1709,13 @@
                         </div>
                         
                         <div className="bg-white rounded-[2rem] shadow-sm border border-slate-100 overflow-hidden mb-8 flex flex-col max-h-[600px]">
-                            <div className="p-6 lg:px-8 border-b border-slate-100 bg-slate-50 flex items-center justify-between sticky top-0">
+                            <div className="p-6 lg:px-8 border-b border-slate-100 bg-slate-50 flex flex-col sm:flex-row sm:items-center justify-between gap-4 sticky top-0">
                                 <h3 className="text-lg font-black text-slate-800">同工排班分析表</h3>
+                                <div className="relative w-full sm:w-64">
+                                    <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                                    <input type="text" placeholder="搜尋姓名..." value={analysisSearchTerm} onChange={e => setAnalysisSearchTerm(e.target.value)} className="w-full bg-white border border-slate-200 rounded-xl pl-9 pr-8 py-2 text-sm font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition-all shadow-sm" />
+                                    {analysisSearchTerm && <button onClick={() => setAnalysisSearchTerm('')} className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:bg-slate-200 rounded-full transition-all"><X size={14} /></button>}
+                                </div>
                             </div>
                             <div className="overflow-x-auto custom-scrollbar flex-1">
                                 <table className="w-full text-left border-collapse min-w-[800px]">
@@ -1771,6 +1793,11 @@
                                         <button onClick={runAutoSchedule} disabled={isLoading} className="w-full bg-slate-900 hover:bg-black disabled:bg-slate-300 text-white font-black py-5 rounded-2xl flex items-center justify-center gap-3 transition-all active:scale-95 shadow-xl">
                                             {isLoading ? <RefreshCw className="animate-spin" /> : <><Play size={20} fill="currentColor"/> 建立新班表</>}
                                         </button>
+                                        {!dbData.memberQuarterSettings.some(s => s.quarter === `${year}-Q${quarter}`) && !isLoading && (
+                                            <p className="text-rose-500 text-[13px] font-bold text-center mt-4 flex items-center justify-center gap-1.5 animate-pulse">
+                                                <AlertCircle size={16} /> 尚未建立 {year}Q{quarter} 同工資料，請先至「同工資料」新增
+                                            </p>
+                                        )}
                                     </div>
                                 ) : (
                                     <div className="animate-fade-in">
