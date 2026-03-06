@@ -1019,6 +1019,10 @@
             const [publishConfirmOpen, setPublishConfirmOpen] = useState(false);
             const [isSaving, setIsSaving] = useState(false);
 
+            // 針對草稿排版的分析狀態
+            const [sortConfig, setSortConfig] = useState({ key: 'totalService', direction: 'desc' });
+            const [selectedPersonalStats, setSelectedPersonalStats] = useState(null);
+
             useEffect(() => { 
                 const fetchInitialData = async () => {
                     setIsLoading(true);
@@ -1036,9 +1040,9 @@
                             existingSchedules: schedules || [], memberQuarterSettings: quarterSettings || []
                         });
 
-                        // 萃取所有現有排班資料的季度
+                        // 萃取所有現有排班資料與同工設定的季度
+                        const quartersSet = new Set();
                         if (schedules) {
-                            const quartersSet = new Set();
                             schedules.forEach(s => {
                                 if (s.service_date) {
                                     const parts = s.service_date.includes('-') ? s.service_date.split('-') : s.service_date.split('/');
@@ -1050,28 +1054,36 @@
                                     }
                                 }
                             });
-                            
-                            // 合併基本季度（確保至少有當前和下一個季度可選）
-                            const baseQuarters = generateBaseQuarters();
-                            baseQuarters.forEach(q => quartersSet.add(q));
-
-                            // 將Set轉換為陣列並排序
-                            const sortedQuarters = Array.from(quartersSet).sort((a, b) => {
-                                const [yearA, qA] = a.split('-Q').map(Number);
-                                const [yearB, qB] = b.split('-Q').map(Number);
-                                if (yearA !== yearB) return yearB - yearA; // 年份大到小
-                                return qB - qA; // 季度大到小
+                        }
+                        // 同時加入同工資料裡有設定過的季度
+                        if (quarterSettings) {
+                            quarterSettings.forEach(qs => {
+                                if (qs.quarter && qs.quarter !== 'SYSTEM') {
+                                    quartersSet.add(qs.quarter);
+                                }
                             });
-                            
-                            setAvailableQuarters(sortedQuarters);
+                        }
+                        
+                        // 合併基本季度（確保至少有當前和下一個季度可選）
+                        const baseQuarters = generateBaseQuarters();
+                        baseQuarters.forEach(q => quartersSet.add(q));
 
-                            // 如果目前的 queryYear/queryQuarter 不在列表中，嘗試設定為最新的一個
-                            const currentQueryStr = `${queryYear}-Q${queryQuarter}`;
-                            if (!sortedQuarters.includes(currentQueryStr) && sortedQuarters.length > 0) {
-                                const [y, q] = sortedQuarters[0].split('-Q').map(Number);
-                                setQueryYear(y);
-                                setQueryQuarter(q);
-                            }
+                        // 將Set轉換為陣列並排序
+                        const sortedQuarters = Array.from(quartersSet).sort((a, b) => {
+                            const [yearA, qA] = a.split('-Q').map(Number);
+                            const [yearB, qB] = b.split('-Q').map(Number);
+                            if (yearA !== yearB) return yearB - yearA; // 年份大到小
+                            return qB - qA; // 季度大到小
+                        });
+                        
+                        setAvailableQuarters(sortedQuarters);
+
+                        // 如果目前的 queryYear/queryQuarter 不在列表中，嘗試設定為最新的一個
+                        const currentQueryStr = `${queryYear}-Q${queryQuarter}`;
+                        if (!sortedQuarters.includes(currentQueryStr) && sortedQuarters.length > 0) {
+                            const [y, q] = sortedQuarters[0].split('-Q').map(Number);
+                            setQueryYear(y);
+                            setQueryQuarter(q);
                         }
 
                     } catch (err) { setErrorMsg('讀取資料庫失敗。請確保網路連線。'); } 
@@ -1548,6 +1560,192 @@
                 document.body.appendChild(link); link.click(); document.body.removeChild(link);
             };
 
+            // ---- 草稿排版專用 Data Analysis (排班/編輯預覽時使用) ----
+            const draftDashboardData = useMemo(() => {
+                const memberStats = {};
+                effectiveMembers.forEach(m => {
+                    const status = (m.availability_status || '').trim();
+                    if (status === '暫停服事' || status === '安息季') return;
+                    memberStats[m.id] = { id: m.id, name: m.name, group: m.group_id, totalService: 0, attendanceDates: new Set(), roles: { '司會': 0, '執事輪值': 0, '接待': 0, '收奉獻': 0, '主餐': 0, 'PPT': 0, '新朋友關懷': 0 } };
+                });
+                generatedDraft.forEach(d => {
+                    if (d.is_empty || !memberStats[d.member_id]) return;
+                    const stats = memberStats[d.member_id];
+                    stats.attendanceDates.add(d.service_date);
+                    stats.totalService += 1;
+                    if (stats.roles[d._positionName] !== undefined) stats.roles[d._positionName] += 1;
+                });
+                return Object.values(memberStats).map(d => {
+                    return { ...d, attendance: d.attendanceDates.size, distinctRolesCount: Object.values(d.roles).filter(c => c > 0).length, healthScore: 0 };
+                }); 
+            }, [generatedDraft, effectiveMembers]);
+
+            const draftDashboardStats = useMemo(() => {
+                if (!draftDashboardData || draftDashboardData.length === 0) return null;
+                const totalMembers = draftDashboardData.length;
+                const totalServices = draftDashboardData.reduce((sum, d) => sum + d.totalService, 0);
+                const totalAttendance = draftDashboardData.reduce((sum, d) => sum + d.attendance, 0);
+                const avgService = totalMembers ? (totalServices / totalMembers) : 0;
+                const avgAttendance = totalMembers ? (totalAttendance / totalMembers) : 0;
+                const variance = draftDashboardData.reduce((sum, d) => sum + Math.pow(d.totalService - avgService, 2), 0) / totalMembers;
+                const stdDev = Math.sqrt(variance);
+                const highRiskThreshold = Math.max(8, avgService + stdDev * 1.5);
+                const highRiskMembers = draftDashboardData.filter(d => d.totalService >= highRiskThreshold);
+                const attentionMembers = draftDashboardData.filter(d => d.totalService >= avgService + stdDev && d.totalService < highRiskThreshold);
+                const multiRoleRatio = totalMembers ? ((draftDashboardData.filter(d => d.distinctRolesCount > 1).length / totalMembers) * 100).toFixed(1) : 0;
+                const maxService = Math.max(0, ...draftDashboardData.map(d => d.totalService));
+                const roleCounts = {};
+                draftDashboardData.forEach(d => { Object.keys(d.roles).forEach(role => { roleCounts[role] = (roleCounts[role] || 0) + d.roles[role]; }); });
+                draftDashboardData.forEach(d => {
+                    if (d.totalService >= highRiskThreshold) d.healthStatus = 'danger';
+                    else if (d.totalService >= avgService + stdDev) d.healthStatus = 'warning';
+                    else d.healthStatus = 'healthy';
+                });
+                return { totalMembers, totalServices, avgService: avgService.toFixed(1), avgAttendance: avgAttendance.toFixed(1), stdDev: stdDev.toFixed(2), maxService, highRiskMembers, attentionMembers, multiRoleRatio, roleCounts };
+            }, [draftDashboardData]);
+
+            const sortedDraftDashboardData = useMemo(() => {
+                if (!draftDashboardData) return [];
+                let sortableItems = [...draftDashboardData];
+                sortableItems.sort((a, b) => {
+                    let aValue = sortConfig.key === 'name' ? a.name : (sortConfig.key === 'totalService' ? a.totalService : (sortConfig.key === 'attendance' ? a.attendance : a.roles[sortConfig.key] || 0));
+                    let bValue = sortConfig.key === 'name' ? b.name : (sortConfig.key === 'totalService' ? b.totalService : (sortConfig.key === 'attendance' ? b.attendance : b.roles[sortConfig.key] || 0));
+                    if (aValue < bValue) return sortConfig.direction === 'asc' ? -1 : 1;
+                    if (aValue > bValue) return sortConfig.direction === 'asc' ? 1 : -1;
+                    if (sortConfig.key !== 'totalService') return b.totalService - a.totalService;
+                    return 0;
+                });
+                return sortableItems;
+            }, [draftDashboardData, sortConfig]);
+
+            const requestSort = (key) => {
+                let direction = 'desc'; if (sortConfig.key === key && sortConfig.direction === 'desc') direction = 'asc';
+                setSortConfig({ key, direction });
+            };
+
+            const generatePersonalAdvice = (stats, globalStats) => {
+                const advice = []; const avg = parseFloat(globalStats.avgService);
+                if (stats.healthStatus === 'danger') advice.push({ icon: ShieldAlert, color: 'text-rose-600', bg: 'bg-rose-50', title: '高風險警示', desc: `本季服事高達 ${stats.totalService} 次，顯著高於平均。建議安排安息週。` });
+                else if (stats.healthStatus === 'warning') advice.push({ icon: AlertTriangle, color: 'text-amber-600', bg: 'bg-amber-50', title: '負荷偏高', desc: '服事頻率略高於群體平均，請留意是否需要適度替班輪休。' });
+                else advice.push({ icon: HeartPulse, color: 'text-emerald-600', bg: 'bg-emerald-50', title: '狀態健康', desc: '目前服事負荷在健康範圍內，感謝穩定的配搭。' });
+                if (stats.distinctRolesCount > 2) advice.push({ icon: GitBranch, color: 'text-indigo-600', bg: 'bg-indigo-50', title: '核心多工', desc: '承擔多項不同崗位，留意避免單日切換過多角色。' });
+                else if (stats.distinctRolesCount === 1 && stats.totalService < avg) advice.push({ icon: Lightbulb, color: 'text-sky-600', bg: 'bg-sky-50', title: '成長潛力', desc: '若恩賜相符，可考慮邀請參與第二專長培訓。' });
+                return advice;
+            };
+
+            const renderPersonalStatsPanelFixed = () => {
+                if (!selectedPersonalStats || !draftDashboardStats) return null;
+                const stats = selectedPersonalStats; const adviceList = generatePersonalAdvice(stats, draftDashboardStats); const diffFromAvg = (stats.totalService - parseFloat(draftDashboardStats.avgService)).toFixed(1);
+                return (
+                    <div className="h-full flex flex-col bg-white animate-fade-in overflow-hidden">
+                        <div className="bg-slate-900 p-6 pb-8 shrink-0">
+                            <div className="flex items-center gap-4">
+                                <div className="w-14 h-14 rounded-full bg-gradient-to-br from-indigo-400 to-purple-500 flex items-center justify-center text-white text-xl font-black shadow-lg">{stats.name.charAt(0)}</div>
+                                <div className="text-white">
+                                    <h2 className="text-xl font-black">{stats.name}</h2>
+                                    <p className="text-slate-400 text-xs font-bold flex items-center gap-2 mt-1">{stats.group ? <span className="bg-white/10 px-2 py-0.5 rounded text-[10px]">{stats.group}</span> : '一般同工'}<span>個人關懷儀表板</span></p>
+                                </div>
+                            </div>
+                        </div>
+                        <div className="flex-1 overflow-y-auto custom-scrollbar p-6 bg-slate-50 space-y-6 -mt-4 rounded-t-3xl relative z-10 border-t border-slate-200">
+                            <div className="grid grid-cols-2 gap-4">
+                                <div className="bg-white p-4 rounded-2xl shadow-sm border border-slate-100 text-center">
+                                    <p className="text-[11px] font-bold text-slate-400 mb-1">本季服事</p><p className="text-2xl font-black text-slate-800">{stats.totalService} <span className="text-xs font-bold text-slate-400">次</span></p>
+                                    <p className={`text-[10px] font-bold mt-1.5 px-1.5 py-0.5 rounded inline-block ${diffFromAvg > 0 ? 'bg-rose-50 text-rose-600' : (diffFromAvg < 0 ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-100 text-slate-500')}`}>{diffFromAvg > 0 ? `+${diffFromAvg} 高於平均` : (diffFromAvg < 0 ? `${diffFromAvg} 低於平均` : '與平均持平')}</p>
+                                </div>
+                                <div className="bg-white p-4 rounded-2xl shadow-sm border border-slate-100 text-center">
+                                    <p className="text-[11px] font-bold text-slate-400 mb-1">出席天數</p><p className="text-2xl font-black text-slate-800">{stats.attendance} <span className="text-xs font-bold text-slate-400">天</span></p>
+                                    <p className="text-[10px] font-bold text-slate-400 mt-1.5">單日最高 {(stats.totalService / Math.max(1, stats.attendance)).toFixed(1)} 次</p>
+                                </div>
+                            </div>
+                            <div>
+                                <h3 className="text-xs font-black text-slate-800 mb-3 flex items-center gap-1.5"><Lightbulb size={14} className="text-amber-500"/> AI 關懷建議</h3>
+                                <div className="space-y-2.5">
+                                    {adviceList.map((adv, idx) => (
+                                        <div key={idx} className={`${adv.bg} border border-white shadow-sm p-3 rounded-xl flex gap-3 items-start`}>
+                                            <adv.icon className={`${adv.color} shrink-0 mt-0.5`} size={16} />
+                                            <div><p className={`text-[13px] font-black ${adv.color} mb-0.5`}>{adv.title}</p><p className="text-[11px] font-bold text-slate-600 leading-relaxed">{adv.desc}</p></div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                            <div>
+                                <h3 className="text-xs font-black text-slate-800 mb-3 flex items-center gap-1.5"><BarChart3 size={14} className="text-indigo-500"/> 崗位參與分佈</h3>
+                                <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-100 space-y-3">
+                                    {Object.entries(stats.roles).filter(([_, count]) => count > 0).sort((a,b)=>b[1]-a[1]).map(([role, count]) => (
+                                        <div key={role}>
+                                            <div className="flex justify-between text-[11px] font-bold mb-1"><span className="text-slate-600">{role}</span><span className="text-indigo-600">{count} 次 <span className="text-slate-400 font-normal">({Math.round(count/stats.totalService*100)}%)</span></span></div>
+                                            <div className="h-1.5 w-full bg-slate-100 rounded-full overflow-hidden"><div className="h-full bg-indigo-400 rounded-full" style={{ width: `${(count/stats.totalService)*100}%` }}></div></div>
+                                        </div>
+                                    ))}
+                                    {stats.distinctRolesCount === 0 && <p className="text-[11px] text-slate-400 text-center py-1">本季尚無安排服事</p>}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                );
+            };
+
+            const renderOriginalDataAnalysis = () => {
+                if (!draftDashboardStats) return null;
+                return (
+                    <div className="h-full overflow-y-auto custom-scrollbar p-6 lg:p-8 animate-fade-in pb-20 bg-slate-50">
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+                            <StatCard icon={Users} title="排班總人數" value={draftDashboardStats.totalMembers} unit="人" iconBgClass="bg-indigo-50" iconTextClass="text-indigo-600" />
+                            <StatCard icon={Layers} title="平均服事次數" value={draftDashboardStats.avgService} unit="次/季" iconBgClass="bg-emerald-50" iconTextClass="text-emerald-600" />
+                            <StatCard icon={CalendarDays} title="平均出席天數" value={draftDashboardStats.avgAttendance} unit="天/季" iconBgClass="bg-sky-50" iconTextClass="text-sky-600" />
+                            <StatCard icon={TrendingUp} title="最高服事紀錄" value={draftDashboardStats.maxService} unit="次" iconBgClass="bg-rose-50" iconTextClass="text-rose-600" />
+                        </div>
+                        <div className="bg-white rounded-[2rem] shadow-sm border border-slate-100 overflow-hidden mb-8 flex flex-col max-h-[600px]">
+                            <div className="p-6 lg:px-8 border-b border-slate-100 bg-slate-50 flex items-center justify-between sticky top-0">
+                                <h3 className="text-lg font-black text-slate-800">同工排班分析表</h3>
+                            </div>
+                            <div className="overflow-x-auto custom-scrollbar flex-1">
+                                <table className="w-full text-left border-collapse min-w-[800px]">
+                                    <thead className="sticky top-0 bg-white/95 backdrop-blur shadow-sm z-10">
+                                        <tr>
+                                            <th onClick={() => requestSort('name')} className="py-4 px-4 font-black text-slate-500 text-sm whitespace-nowrap pl-8 border-b border-slate-100 cursor-pointer hover:bg-slate-50 select-none">姓名 <ArrowUpDown size={14} className="inline ml-1 opacity-40"/></th>
+                                            <th onClick={() => requestSort('totalService')} className="py-4 px-4 font-black text-slate-500 text-sm whitespace-nowrap border-b border-slate-100 text-center cursor-pointer hover:bg-slate-50">服事次數 <ArrowUpDown size={14} className="inline ml-1 opacity-40"/></th>
+                                            <th onClick={() => requestSort('attendance')} className="py-4 px-4 font-black text-slate-500 text-sm whitespace-nowrap border-b border-slate-100 text-center cursor-pointer hover:bg-slate-50">出席天數 <ArrowUpDown size={14} className="inline ml-1 opacity-40"/></th>
+                                            {['司會', '執事輪值', '接待', '收奉獻', '主餐', 'PPT', '新朋友關懷'].map(role => (
+                                                <th key={role} onClick={() => requestSort(role)} className="py-4 px-4 font-black text-slate-500 text-sm whitespace-nowrap border-b border-slate-100 text-center cursor-pointer hover:bg-slate-50">{role} <ArrowUpDown size={14} className="inline ml-1 opacity-40"/></th>
+                                            ))}
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {sortedDraftDashboardData.map((d, i) => (
+                                            <tr key={i} className="border-b border-slate-50 hover:bg-slate-50/50 transition-colors">
+                                                <td className="py-3 px-4 pl-8 whitespace-nowrap"><p className="font-black text-slate-800 text-base">{d.name}</p></td>
+                                                <td className="py-3 px-4 text-center font-black text-slate-600 bg-slate-50/50">{d.totalService}</td>
+                                                <td className="py-3 px-4 text-center font-bold text-slate-600">{d.attendance}</td>
+                                                {['司會', '執事輪值', '接待', '收奉獻', '主餐', 'PPT', '新朋友關懷'].map(role => (
+                                                    <td key={role} className="py-3 px-4 text-center font-bold text-slate-400">{d.roles[role] || '-'}</td>
+                                                ))}
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                        <div className="bg-white p-8 lg:p-10 rounded-[2rem] shadow-sm border border-slate-100">
+                            <h3 className="text-xl font-black text-slate-800 mb-8">🛠️ 本季崗位需求 <span className="text-sm text-slate-500 font-bold ml-2">(合計：{draftDashboardStats.totalServices} 次)</span></h3>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-x-12 gap-y-6">
+                                {Object.entries(draftDashboardStats.roleCounts).sort((a,b) => b[1] - a[1]).map(([role, count]) => {
+                                    const pct = draftDashboardStats.totalServices ? ((count / draftDashboardStats.totalServices) * 100).toFixed(1) : 0;
+                                    return (
+                                        <div key={role} className="flex items-center gap-4">
+                                            <div className="w-24 text-right font-black text-slate-600 text-sm">{role}</div>
+                                            <div className="flex-1 h-5 bg-slate-100 rounded-full overflow-hidden flex items-center"><div className="h-full bg-indigo-500 rounded-full transition-all duration-1000" style={{ width: `${pct}%` }}></div></div>
+                                            <div className="w-20 text-sm font-bold text-slate-500">{count} 次 <span className="text-[10px] opacity-60">({pct}%)</span></div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    </div>
+                );
+            };
+
             // ---- 新增：專屬 Data Insights 運算邏輯 Hook ----
             const insights = useMemo(() => {
                 const schedules = dbData.existingSchedules || [];
@@ -1718,7 +1916,7 @@
                                                     }} 
                                                     className="w-full bg-slate-50 border border-slate-200 rounded-3xl px-6 py-5 font-bold focus:ring-4 focus:ring-indigo-50 focus:bg-white outline-none transition-all"
                                                 >
-                                                    {generateBaseQuarters().map(qStr => {
+                                                    {availableQuarters.map(qStr => {
                                                         const [y, q] = qStr.split('-Q');
                                                         return <option key={qStr} value={qStr}>{y}年 Q{q}季</option>
                                                     })}
@@ -1820,7 +2018,7 @@
                             <div className="flex flex-col items-end gap-3 mt-4 xl:mt-0 w-full xl:w-auto">
                                 <div className="flex items-center gap-3 flex-wrap justify-end">
                                     <div className="flex bg-slate-100 p-1.5 rounded-2xl w-full md:w-auto overflow-x-auto custom-scrollbar shadow-inner border border-slate-200">
-                                        {['第一堂', '第二堂'].map(tab => (
+                                        {['第一堂', '第二堂', '📊 數據分析'].map(tab => (
                                             <button key={tab} onClick={() => { setActiveSessionTab(tab); setActiveSlot(null); }} className={`px-5 py-2 rounded-xl text-sm font-black transition-all whitespace-nowrap ${activeSessionTab === tab ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700 hover:bg-slate-200/50'}`}>{tab}</button>
                                         ))}
                                         {appMode === 'schedule' && (
@@ -1838,36 +2036,49 @@
                             </div>
                         </div>
                         <div className="flex-1 flex flex-col lg:flex-row overflow-hidden relative">
-                            <div className="flex-1 flex flex-col h-full relative overflow-hidden">
-                                <div className="flex flex-col h-full bg-slate-50 relative">
-                                    <div className="overflow-x-auto shadow-inner bg-slate-50/50 custom-scrollbar flex-1 p-6 relative">
-                                        <table className="w-max schedule-table border-collapse min-w-full mx-auto bg-white rounded-2xl overflow-hidden shadow-sm">
-                                            <thead>
-                                                <tr>
-                                                    <th className="sticky left-0 z-20 bg-slate-200/95 backdrop-blur whitespace-nowrap text-center px-4 w-[110px]">日期</th>
-                                                    <th className="whitespace-nowrap">司會</th><th className="whitespace-nowrap">執事</th><th className="whitespace-nowrap">接待</th>
-                                                    <th className="whitespace-nowrap">收奉獻</th><th className="whitespace-nowrap">主餐</th><th className="whitespace-nowrap">PPT</th><th className="whitespace-nowrap">新朋友關懷</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                                {rowsToDisplay.length > 0 ? (
-                                                    rowsToDisplay.map((row, idx) => {
-                                                        const isEven = idx % 2 === 0; const rowBg = isEven ? 'bg-white' : 'bg-slate-50/50'; const stickyBg = isEven ? 'bg-white/95' : 'bg-slate-50/95';
-                                                        return (
-                                                            <tr key={idx} className={rowBg}>
-                                                                <td className={`sticky left-0 z-10 font-bold text-slate-500 text-center whitespace-nowrap px-4 backdrop-blur-sm border-r border-slate-100 ${stickyBg}`}>{row.date}</td>
-                                                                <ScheduleCell row={row} positionName="司會" /><ScheduleCell row={row} positionName="執事輪值" /><ScheduleCell row={row} positionName="接待" gridCols={2} />
-                                                                <ScheduleCell row={row} positionName="收奉獻" gridCols={2} /><ScheduleCell row={row} positionName="主餐" gridCols={2} /><ScheduleCell row={row} positionName="PPT" /><ScheduleCell row={row} positionName="新朋友關懷" gridCols={2} />
-                                                            </tr>
-                                                        );
-                                                    })
-                                                ) : (<tr><td colSpan="8" className="text-center py-16 text-slate-400 font-bold bg-white">此堂別尚無排班資料</td></tr>)}
-                                            </tbody>
-                                        </table>
+                            {activeSessionTab === '📊 數據分析' ? renderOriginalDataAnalysis() : (
+                                <div className="flex-1 flex flex-col h-full relative overflow-hidden">
+                                    <div className="flex flex-col h-full bg-slate-50 relative">
+                                        <div className="overflow-x-auto shadow-inner bg-slate-50/50 custom-scrollbar flex-1 p-6 relative">
+                                            <table className="w-max schedule-table border-collapse min-w-full mx-auto bg-white rounded-2xl overflow-hidden shadow-sm">
+                                                <thead>
+                                                    <tr>
+                                                        <th className="sticky left-0 z-20 bg-slate-200/95 backdrop-blur whitespace-nowrap text-center px-4 w-[110px]">日期</th>
+                                                        <th className="whitespace-nowrap">司會</th><th className="whitespace-nowrap">執事</th><th className="whitespace-nowrap">接待</th>
+                                                        <th className="whitespace-nowrap">收奉獻</th><th className="whitespace-nowrap">主餐</th><th className="whitespace-nowrap">PPT</th><th className="whitespace-nowrap">新朋友關懷</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {rowsToDisplay.length > 0 ? (
+                                                        rowsToDisplay.map((row, idx) => {
+                                                            const isEven = idx % 2 === 0; const rowBg = isEven ? 'bg-white' : 'bg-slate-50/50'; const stickyBg = isEven ? 'bg-white/95' : 'bg-slate-50/95';
+                                                            return (
+                                                                <tr key={idx} className={rowBg}>
+                                                                    <td className={`sticky left-0 z-10 font-bold text-slate-500 text-center whitespace-nowrap px-4 backdrop-blur-sm border-r border-slate-100 ${stickyBg}`}>{row.date}</td>
+                                                                    <ScheduleCell row={row} positionName="司會" /><ScheduleCell row={row} positionName="執事輪值" /><ScheduleCell row={row} positionName="接待" gridCols={2} />
+                                                                    <ScheduleCell row={row} positionName="收奉獻" gridCols={2} /><ScheduleCell row={row} positionName="主餐" gridCols={2} /><ScheduleCell row={row} positionName="PPT" /><ScheduleCell row={row} positionName="新朋友關懷" gridCols={2} />
+                                                                </tr>
+                                                            );
+                                                        })
+                                                    ) : (<tr><td colSpan="8" className="text-center py-16 text-slate-400 font-bold bg-white">此堂別尚無排班資料</td></tr>)}
+                                                </tbody>
+                                            </table>
+                                        </div>
                                     </div>
+                                    {activeSlot && renderRecommendationPanel()}
                                 </div>
-                            </div>
-                            {activeSlot && renderRecommendationPanel()}
+                            )}
+                            {activeSessionTab !== '📊 數據分析' && (
+                                <div className="w-full lg:w-[400px] xl:w-[450px] shrink-0 bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden h-full flex flex-col">
+                                    {selectedPersonalStats ? renderPersonalStatsPanelFixed() : (
+                                        <div className="h-full flex flex-col items-center justify-center text-slate-400 p-8 text-center bg-slate-50/50">
+                                            <div className="w-20 h-20 bg-slate-100 rounded-full flex items-center justify-center mb-6 shadow-inner border border-slate-200/50"><UserCheck size={36} className="text-slate-300" /></div>
+                                            <h3 className="text-lg font-black text-slate-600 mb-2">專屬關懷視角</h3>
+                                            <p className="text-[13px] font-bold text-slate-500 leading-relaxed max-w-[250px]">請點擊左側上方分頁進入「📊 數據分析」，再點擊有異常名單的同工，即可在此查看深度分析與 AI 牧養建議。</p>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
                         </div>
                     </div>
                 );
