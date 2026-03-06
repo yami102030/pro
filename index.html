@@ -1098,7 +1098,9 @@
                     setDbData(prev => ({ ...prev, existingSchedules: latestSchedules || [] }));
 
                     const reconstructed = [];
-                    const sundays = window.ScheduleEngine ? window.ScheduleEngine.getSundaysInQuarter(qY, qQ) : [];
+                    
+                    // 改用系統內建的 getSundaysInQuarter 函數，強制統一為 YYYY-MM-DD 格式，避免外部引擎格式錯誤或時區偏移
+                    const sundaysStr = getSundaysInQuarter(`${qY}-Q${qQ}`);
                     
                     const dbSchedules = (latestSchedules || []).filter(s => {
                         if (!s.service_date) return false;
@@ -1111,30 +1113,51 @@
 
                     const roleLimits = { '司會': 1, 'PPT': 1, '主餐': 2, '收奉獻': 2, '接待': 2, '新朋友關懷': 2, '執事輪值': 1 };
 
-                    sundays.forEach(sunday => {
-                        const dateStr = window.ScheduleEngine ? window.ScheduleEngine.formatDate(sunday) : sunday.toISOString().split('T')[0];
+                    sundaysStr.forEach(dateStr => {
                         sessionsToSchedule.forEach(session => {
                             dbData.positions.forEach(pos => {
                                 const posName = pos.name.trim();
                                 if (!['司會', 'PPT', '主餐', '收奉獻', '接待', '新朋友關懷', '執事輪值'].includes(posName)) return;
-                                if (posName === '主餐' && sunday.getDate() > 7) return; 
+                                
+                                // 主餐條件：日期(dd) <= 7 的那一週
+                                const dayNum = parseInt(dateStr.split('-')[2], 10);
+                                if (posName === '主餐' && dayNum > 7) return; 
 
                                 const maxPeople = pos.max_people || roleLimits[posName] || 1;
-                                const existingForSlot = dbSchedules.filter(s => s.service_date === dateStr && s.session.trim() === session && String(s.position_id) === String(pos.id));
+                                
+                                // 強制統一日期格式進行比對，將資料庫中的斜線(如有)轉為橫線
+                                const existingForSlot = dbSchedules.filter(s => {
+                                    const normalizedDbDate = s.service_date.replace(/\//g, '-');
+                                    return normalizedDbDate === dateStr && s.session.trim() === session && String(s.position_id) === String(pos.id);
+                                });
 
                                 existingForSlot.forEach(s => {
-                                    const member = effectiveMembers.find(m => String(m.id) === String(s.member_id));
+                                    // 這裡直接讀取 dbData.members 找人，避免 effectiveMembers 閉包延遲導致查無姓名
+                                    const member = dbData.members.find(m => String(m.id) === String(s.member_id));
                                     reconstructed.push({
-                                        temp_id: `DB_${s.id || Math.random()}_${Math.random()}`, service_date: dateStr, session: session, member_id: s.member_id, position_id: s.position_id,
-                                        _memberName: member ? member.name : '未知同工', _positionName: posName, is_empty: false, is_emergency: 0
+                                        temp_id: `DB_${s.id || Math.random()}_${Math.random()}`, 
+                                        service_date: dateStr, 
+                                        session: session, 
+                                        member_id: s.member_id, 
+                                        position_id: s.position_id,
+                                        _memberName: member ? member.name : '未知同工', 
+                                        _positionName: posName, 
+                                        is_empty: false, 
+                                        is_emergency: 0
                                     });
                                 });
 
                                 const missingCount = maxPeople - existingForSlot.length;
                                 for (let i = 0; i < missingCount; i++) {
                                     reconstructed.push({
-                                        temp_id: `EMPTY_${dateStr}_${session}_${pos.id}_${Math.random()}`, service_date: dateStr, session: session, member_id: 'EMPTY_SLOT', position_id: pos.id,
-                                        _memberName: '⚠️ 需手動指派', _positionName: posName, is_empty: true
+                                        temp_id: `EMPTY_${dateStr}_${session}_${pos.id}_${Math.random()}`, 
+                                        service_date: dateStr, 
+                                        session: session, 
+                                        member_id: 'EMPTY_SLOT', 
+                                        position_id: pos.id,
+                                        _memberName: '⚠️ 需手動指派', 
+                                        _positionName: posName, 
+                                        is_empty: true
                                     });
                                 }
                             });
@@ -1145,7 +1168,10 @@
                     setErrorMsg('');
                     if (schedulingPhase === 'setup') setActiveSessionTab('第一堂');
                     setSchedulingPhase('editor');
-                } catch (error) { setErrorMsg('查詢班表失敗，請確認網路連線。'); } finally { setIsLoading(false); }
+                } catch (error) { 
+                    console.error(error);
+                    setErrorMsg('查詢班表失敗，請確認網路連線。'); 
+                } finally { setIsLoading(false); }
             };
 
             const currentUsageCount = useMemo(() => {
@@ -1443,9 +1469,11 @@
             const executePublish = async () => {
                 setPublishConfirmOpen(false); setIsSaving(true);
                 try {
-                    const sundays = window.ScheduleEngine.getSundaysInQuarter(year, quarter);
-                    const startDate = window.ScheduleEngine.formatDate(sundays[0]);
-                    const endDate = window.ScheduleEngine.formatDate(sundays[sundays.length - 1]);
+                    // 同步改用系統內建函數避免刪除區間抓錯
+                    const sundays = getSundaysInQuarter(`${year}-Q${quarter}`);
+                    const startDate = sundays[0];
+                    const endDate = sundays[sundays.length - 1];
+                    
                     await supabase.from('schedules').delete().gte('service_date', startDate).lte('service_date', endDate).in('session', sessionsToSchedule); 
                     const insertPayload = generatedDraft.map(d => ({ service_date: d.service_date, session: d.session, member_id: d.member_id, position_id: d.position_id }));
                     await supabase.from('schedules').insert(insertPayload);
