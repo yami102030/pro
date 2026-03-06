@@ -109,6 +109,40 @@
         // ==========================================
         // 共用工具函數
         // ==========================================
+        
+        // 突破 Supabase 1000筆限制的自動分頁抓取引擎
+        const fetchAllData = async (tableName, orderByCol = null, selectFields = '*') => {
+            let allData = [];
+            let offset = 0;
+            const limit = 1000;
+            let keepFetching = true;
+            while (keepFetching) {
+                let query = supabase.from(tableName).select(selectFields);
+                if (orderByCol) query = query.order(orderByCol, { ascending: false });
+                const { data, error } = await query.range(offset, offset + limit - 1);
+                if (error || !data || data.length === 0) break;
+                allData = [...allData, ...data];
+                if (data.length < limit) break;
+                offset += limit;
+            }
+            return allData;
+        };
+
+        // 安全的日期解析器，不受系統時區(UTC)干擾，保證 YYYY-MM-DD 格式
+        const parseDbDate = (dateStr) => {
+            if (!dateStr) return null;
+            const match = dateStr.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})/);
+            if (match) {
+                return {
+                    y: parseInt(match[1], 10),
+                    m: parseInt(match[2], 10),
+                    d: parseInt(match[3], 10),
+                    padded: `${match[1]}-${match[2].padStart(2, '0')}-${match[3].padStart(2, '0')}`
+                };
+            }
+            return null;
+        };
+
         const formatEmailForAuth = (acc) => {
             if (!acc) return '';
             const trimmed = acc.trim();
@@ -352,15 +386,14 @@
             const loadData = async () => {
                 setIsLoading(true);
                 try {
-                    const { data: allSettingsQs } = await supabase.from('member_quarter_settings').select('quarter');
-                    const [
-                        { data: mData }, { data: pData }, { data: mpData }, { data: qsData }, { data: sysSettingsData } 
-                    ] = await Promise.all([
-                        supabase.from('members').select('*').order('name'),
-                        supabase.from('positions').select('*').order('id'),
-                        supabase.from('member_positions').select('*').eq('quarter', viewQuarter),
-                        supabase.from('member_quarter_settings').select('*').eq('quarter', viewQuarter),
-                        supabase.from('member_quarter_settings').select('*').eq('quarter', 'SYSTEM')
+                    const allSettingsQs = await fetchAllData('member_quarter_settings', 'quarter', 'quarter');
+                    
+                    const [mData, pData, mpData, qsData, sysSettingsData] = await Promise.all([
+                        fetchAllData('members', 'name'),
+                        fetchAllData('positions', 'id'),
+                        supabase.from('member_positions').select('*').eq('quarter', viewQuarter).limit(5000).then(r=>r.data),
+                        supabase.from('member_quarter_settings').select('*').eq('quarter', viewQuarter).limit(5000).then(r=>r.data),
+                        supabase.from('member_quarter_settings').select('*').eq('quarter', 'SYSTEM').then(r=>r.data)
                     ]);
 
                     setMembers(mData || []);
@@ -428,8 +461,8 @@
             const executeCreateNextQuarter = async (sourceQ, targetQ) => {
                 setConfirmAction(null); setIsLoading(true);
                 try {
-                    const { data: oldSettings, error: err1 } = await supabase.from('member_quarter_settings').select('*').eq('quarter', sourceQ);
-                    const { data: oldPos, error: err2 } = await supabase.from('member_positions').select('*').eq('quarter', sourceQ);
+                    const { data: oldSettings, error: err1 } = await supabase.from('member_quarter_settings').select('*').eq('quarter', sourceQ).limit(5000);
+                    const { data: oldPos, error: err2 } = await supabase.from('member_positions').select('*').eq('quarter', sourceQ).limit(5000);
                     if (err1) throw err1; if (err2) throw err2;
                     if ((!oldSettings || oldSettings.length === 0) && (!oldPos || oldPos.length === 0)) throw new Error(`【${sourceQ}】目前沒有任何資料可供複製！`);
 
@@ -472,8 +505,8 @@
             const openDeleteQuarterModal = async () => {
                 setIsLoading(true);
                 try {
-                    const { data: allSettingsQs } = await supabase.from('member_quarter_settings').select('quarter');
-                    const { data: allPosQs } = await supabase.from('member_positions').select('quarter');
+                    const allSettingsQs = await fetchAllData('member_quarter_settings', 'quarter', 'quarter');
+                    const allPosQs = await fetchAllData('member_positions', 'quarter', 'quarter');
                     const combined = [...(allSettingsQs || []), ...(allPosQs || [])].map(d => d.quarter);
                     
                     const currentQ = getCurrentQuarter(); // 取得本季度
@@ -1010,7 +1043,7 @@
             const [generatedDraft, setGeneratedDraft] = useState([]);
             const [errorMsg, setErrorMsg] = useState('');
             const [showSuccessToast, setShowSuccessToast] = useState(false);
-            const [availableQuarters, setAvailableQuarters] = useState([]); // 新增：儲存所有可用的季度
+            const [availableQuarters, setAvailableQuarters] = useState([]); 
             
             const [activeSlot, setActiveSlot] = useState(null); 
             const [searchTerm, setSearchTerm] = useState('');
@@ -1027,12 +1060,12 @@
                 const fetchInitialData = async () => {
                     setIsLoading(true);
                     try {
-                        const [{ data: members }, { data: positions }, { data: memberPositions }, { data: schedules }, { data: quarterSettings }] = await Promise.all([
-                            supabase.from('members').select('*'),
-                            supabase.from('positions').select('*'),
-                            supabase.from('member_positions').select('*'),
-                            supabase.from('schedules').select('*').limit(10000), // 擴增抓取上限至一萬筆
-                            supabase.from('member_quarter_settings').select('*')
+                        const [members, positions, memberPositions, schedules, quarterSettings] = await Promise.all([
+                            fetchAllData('members', 'id'),
+                            fetchAllData('positions', 'id'),
+                            fetchAllData('member_positions', 'quarter'),
+                            fetchAllData('schedules', 'service_date'),
+                            fetchAllData('member_quarter_settings', 'quarter')
                         ]);
                         
                         setDbData({ 
@@ -1044,14 +1077,10 @@
                         const quartersSet = new Set();
                         if (schedules) {
                             schedules.forEach(s => {
-                                if (s.service_date) {
-                                    const parts = s.service_date.includes('-') ? s.service_date.split('-') : s.service_date.split('/');
-                                    if (parts.length >= 2) {
-                                        const y = parseInt(parts[0], 10);
-                                        const m = parseInt(parts[1], 10);
-                                        const q = Math.ceil(m / 3);
-                                        quartersSet.add(`${y}-Q${q}`);
-                                    }
+                                const d = parseDbDate(s.service_date);
+                                if (d) {
+                                    const q = Math.ceil(d.m / 3);
+                                    quartersSet.add(`${d.y}-Q${q}`);
                                 }
                             });
                         }
@@ -1147,21 +1176,17 @@
                 setIsLoading(true);
                 try {
                     const qY = queryYear; const qQ = queryQuarter; setYear(qY); setQuarter(qQ);
-                    const [{ data: latestSchedules }] = await Promise.all([ supabase.from('schedules').select('*').limit(10000) ]); // 擴增抓取上限至一萬筆
+                    const latestSchedules = await fetchAllData('schedules', 'service_date');
                     setDbData(prev => ({ ...prev, existingSchedules: latestSchedules || [] }));
 
                     const reconstructed = [];
                     
-                    // 改用系統內建的 getSundaysInQuarter 函數，強制統一為 YYYY-MM-DD 格式，避免外部引擎格式錯誤或時區偏移
                     const sundaysStr = getSundaysInQuarter(`${qY}-Q${qQ}`);
                     
                     const dbSchedules = (latestSchedules || []).filter(s => {
-                        if (!s.service_date) return false;
-                        const parts = s.service_date.includes('-') ? s.service_date.split('-') : s.service_date.split('/');
-                        if (parts.length < 2) return false;
-                        const sy = parseInt(parts[0], 10);
-                        const sm = parseInt(parts[1], 10);
-                        return sy === qY && Math.ceil(sm / 3) === qQ;
+                        const d = parseDbDate(s.service_date);
+                        if (!d) return false;
+                        return d.y === qY && Math.ceil(d.m / 3) === qQ;
                     });
 
                     const roleLimits = { '司會': 1, 'PPT': 1, '主餐': 2, '收奉獻': 2, '接待': 2, '新朋友關懷': 2, '執事輪值': 1 };
@@ -1178,10 +1203,10 @@
 
                                 const maxPeople = pos.max_people || roleLimits[posName] || 1;
                                 
-                                // 強制統一日期格式進行比對，將資料庫中的斜線(如有)轉為橫線
+                                // 強制統一日期格式進行比對
                                 const existingForSlot = dbSchedules.filter(s => {
-                                    const normalizedDbDate = s.service_date.replace(/\//g, '-');
-                                    return normalizedDbDate === dateStr && s.session.trim() === session && String(s.position_id) === String(pos.id);
+                                    const d = parseDbDate(s.service_date);
+                                    return d && d.padded === dateStr && s.session.trim() === session && String(s.position_id) === String(pos.id);
                                 });
 
                                 existingForSlot.forEach(s => {
@@ -1522,7 +1547,6 @@
             const executePublish = async () => {
                 setPublishConfirmOpen(false); setIsSaving(true);
                 try {
-                    // 同步改用系統內建函數避免刪除區間抓錯
                     const sundays = getSundaysInQuarter(`${year}-Q${quarter}`);
                     const startDate = sundays[0];
                     const endDate = sundays[sundays.length - 1];
@@ -1758,16 +1782,12 @@
                 // 1. 歷季平均服事次數 / 天數 / 人數 (Quarterly Tables with YoY & QoQ/MoM)
                 const quarterStats = {};
                 schedules.forEach(s => {
-                    if (!s.service_date) return;
+                    const d = parseDbDate(s.service_date);
+                    if (!d) return;
                     
-                    // 【重要修正】全面棄用 new Date() 避免時區偏移跑到上一個月
-                    // 直接透過字串分割萃取 年、月
-                    const parts = s.service_date.includes('-') ? s.service_date.split('-') : s.service_date.split('/');
-                    if (parts.length < 2) return;
-                    
-                    const y = parseInt(parts[0], 10);
-                    const m = parseInt(parts[1], 10); // 1-12
-                    const q = Math.ceil(m / 3);       // 例如 4月: Math.ceil(4/3) = 2 (Q2)
+                    const y = d.y;
+                    const m = d.m;
+                    const q = Math.ceil(m / 3);       
                     
                     const key = `${y}Q${q}`;
                     if (!quarterStats[key]) {
@@ -1777,10 +1797,10 @@
                     quarterStats[key].uniqueMembers.add(s.member_id);
                     
                     // 為了計算天數與人數，先用日期作為 Key 將當日服事名單匯聚
-                    if (!quarterStats[key].dates[s.service_date]) {
-                        quarterStats[key].dates[s.service_date] = new Set();
+                    if (!quarterStats[key].dates[d.padded]) {
+                        quarterStats[key].dates[d.padded] = new Set();
                     }
-                    quarterStats[key].dates[s.service_date].add(s.member_id);
+                    quarterStats[key].dates[d.padded].add(s.member_id);
                 });
 
                 const quarterlyData = Object.keys(quarterStats).map(key => {
@@ -1833,7 +1853,12 @@
                 const ninetyDaysAgo = new Date();
                 ninetyDaysAgo.setDate(new Date().getDate() - 90);
 
-                const recentScheds = schedules.filter(s => new Date(s.service_date) >= ninetyDaysAgo);
+                const recentScheds = schedules.filter(s => {
+                    const d = parseDbDate(s.service_date);
+                    if (!d) return false;
+                    const realDate = new Date(d.y, d.m - 1, d.d);
+                    return realDate >= ninetyDaysAgo;
+                });
                 const memberCounts = {};
                 recentScheds.forEach(s => {
                     memberCounts[s.member_id] = (memberCounts[s.member_id] || 0) + 1;
@@ -1846,8 +1871,8 @@
                     pr90Threshold = countsArray[index];
                 }
 
-                const getWeekNumber = (d) => {
-                    const date = new Date(d);
+                const getWeekNumber = (y, m, d) => {
+                    const date = new Date(y, m - 1, d);
                     date.setUTCDate(date.getUTCDate() + 4 - (date.getUTCDay()||7));
                     const yearStart = new Date(Date.UTC(date.getUTCFullYear(),0,1));
                     return Math.ceil((((date - yearStart) / 86400000) + 1)/7);
@@ -1858,8 +1883,8 @@
                     const count = memberCounts[m.id] || 0;
                     if (count >= pr90Threshold && count > 0) {
                         // Check consecutive weeks
-                        const mScheds = recentScheds.filter(s => s.member_id === m.id).map(s => s.service_date).sort();
-                        const weeks = [...new Set(mScheds.map(d => getWeekNumber(d)))].sort((a, b) => a - b);
+                        const mScheds = recentScheds.filter(s => s.member_id === m.id).map(s => parseDbDate(s.service_date));
+                        const weeks = [...new Set(mScheds.map(dObj => getWeekNumber(dObj.y, dObj.m, dObj.d)))].sort((a, b) => a - b);
 
                         let maxConsecutive = 1;
                         let currentConsecutive = 1;
