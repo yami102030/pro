@@ -1485,41 +1485,52 @@
                 const members = dbData.members || [];
                 if (!schedules.length || !members.length) return null;
 
-                const now = new Date();
-                const currentYear = now.getFullYear();
-                const currentMonth = now.getMonth();
-
-                const getMonthSchedules = (y, m) => schedules.filter(s => {
-                    if (!s.service_date) return false;
+                // 1. 歷季平均服事次數 (Quarterly Table with YoY & QoQ/MoM)
+                const quarterStats = {};
+                schedules.forEach(s => {
+                    if (!s.service_date) return;
                     const d = new Date(s.service_date);
-                    return d.getFullYear() === y && d.getMonth() === m;
+                    const y = d.getFullYear();
+                    const q = Math.floor(d.getMonth() / 3) + 1;
+                    const key = `${y}Q${q}`;
+                    if (!quarterStats[key]) {
+                        quarterStats[key] = { year: y, quarter: q, schedules: [], uniqueMembers: new Set() };
+                    }
+                    quarterStats[key].schedules.push(s);
+                    quarterStats[key].uniqueMembers.add(s.member_id);
                 });
 
-                const calcAvg = (scheds) => {
-                    if (!scheds.length) return 0;
-                    const uniqueMembers = new Set(scheds.map(s => s.member_id)).size;
-                    return uniqueMembers === 0 ? 0 : (scheds.length / uniqueMembers);
-                };
+                const quarterlyData = Object.keys(quarterStats).map(key => {
+                    const stat = quarterStats[key];
+                    const avg = stat.uniqueMembers.size === 0 ? 0 : stat.schedules.length / stat.uniqueMembers.size;
+                    return { key, year: stat.year, quarter: stat.quarter, avg };
+                }).sort((a, b) => b.year !== a.year ? b.year - a.year : b.quarter - a.quarter);
 
-                const currentScheds = getMonthSchedules(currentYear, currentMonth);
-                const lastMonthScheds = getMonthSchedules(currentMonth === 0 ? currentYear - 1 : currentYear, currentMonth === 0 ? 11 : currentMonth - 1);
-                const lastYearScheds = getMonthSchedules(currentYear - 1, currentMonth);
+                const quarterlyTable = quarterlyData.map(d => {
+                    const prevQ_Y = d.quarter === 1 ? d.year - 1 : d.year;
+                    const prevQ_Q = d.quarter === 1 ? 4 : d.quarter - 1;
+                    const prevQKey = `${prevQ_Y}Q${prevQ_Q}`;
+                    const prevYKey = `${d.year - 1}Q${d.quarter}`;
 
-                const currentAvg = calcAvg(currentScheds);
-                const lastMonthAvg = calcAvg(lastMonthScheds);
-                const lastYearAvg = calcAvg(lastYearScheds);
+                    const prevQData = quarterlyData.find(x => x.key === prevQKey);
+                    const prevYData = quarterlyData.find(x => x.key === prevYKey);
 
-                const calcPercent = (curr, prev) => {
-                    if (prev === 0) return curr > 0 ? 100 : 0;
-                    return ((curr - prev) / prev) * 100;
-                };
+                    const calcPct = (curr, prev) => {
+                        if (!prev) return null;
+                        if (prev.avg === 0) return curr > 0 ? 100 : 0;
+                        return ((curr - prev.avg) / prev.avg) * 100;
+                    };
 
-                const mom = calcPercent(currentAvg, lastMonthAvg);
-                const yoy = calcPercent(currentAvg, lastYearAvg);
+                    return {
+                        ...d,
+                        qoq: calcPct(d.avg, prevQData),
+                        yoy: calcPct(d.avg, prevYData)
+                    };
+                });
 
                 // 2. PR90 & Consecutive 3 weeks (using last 90 days for evaluation)
                 const ninetyDaysAgo = new Date();
-                ninetyDaysAgo.setDate(now.getDate() - 90);
+                ninetyDaysAgo.setDate(new Date().getDate() - 90);
 
                 const recentScheds = schedules.filter(s => new Date(s.service_date) >= ninetyDaysAgo);
                 const memberCounts = {};
@@ -1571,9 +1582,7 @@
                 });
 
                 return {
-                    avg: currentAvg.toFixed(1),
-                    mom: mom.toFixed(1),
-                    yoy: yoy.toFixed(1),
+                    quarterlyTable,
                     pr90Threshold,
                     burnoutMembers: burnoutMembers.sort((a, b) => b.consecutiveWeeks - a.consecutiveWeeks)
                 };
@@ -1762,35 +1771,53 @@
                         </div>
                         <div className="flex-1 overflow-y-auto custom-scrollbar p-6 lg:p-8 space-y-6">
                             
-                            {/* 1. 平均服事指標卡 (包含 YoY / MoM) */}
-                            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                                <div className="bg-white p-6 rounded-[2rem] shadow-sm border border-slate-100 flex flex-col relative overflow-hidden">
-                                    <div className="flex justify-between items-start mb-4 relative z-10">
-                                        <div className="bg-indigo-50 p-3 rounded-2xl text-indigo-600"><Layers size={22} strokeWidth={2.5}/></div>
-                                    </div>
-                                    <div className="relative z-10">
-                                        <p className="text-[13px] font-bold text-slate-500 mb-1">本月平均服事次數</p>
-                                        <p className="text-4xl font-black text-slate-800 tracking-tight">{insights.avg} <span className="text-sm font-bold text-slate-400 ml-1">次/人</span></p>
-                                    </div>
-                                    <div className="mt-4 flex gap-4 text-sm font-bold relative z-10">
-                                        <div className="flex items-center gap-1">
-                                            <span className="text-slate-500">MoM</span>
-                                            <span className={insights.mom >= 0 ? "text-rose-500" : "text-emerald-500"}>
-                                                {insights.mom >= 0 ? <ArrowUp size={14} className="inline"/> : <ArrowDown size={14} className="inline"/>}
-                                                {Math.abs(insights.mom)}%
-                                            </span>
-                                        </div>
-                                        <div className="flex items-center gap-1">
-                                            <span className="text-slate-500">YoY</span>
-                                            <span className={insights.yoy >= 0 ? "text-rose-500" : "text-emerald-500"}>
-                                                {insights.yoy >= 0 ? <ArrowUp size={14} className="inline"/> : <ArrowDown size={14} className="inline"/>}
-                                                {Math.abs(insights.yoy)}%
-                                            </span>
-                                        </div>
-                                    </div>
-                                    <div className="absolute -bottom-6 -right-6 opacity-[0.03] scale-150 text-indigo-600">
-                                        <Layers size={100} />
-                                    </div>
+                            {/* 1. 季度平均服事次數 (包含 YoY / MoM 表格) */}
+                            <div className="bg-white rounded-[2rem] shadow-sm border border-slate-100 overflow-hidden">
+                                <div className="p-6 border-b border-slate-100 bg-indigo-50 flex items-center gap-2">
+                                    <Layers className="text-indigo-600" size={24} />
+                                    <h3 className="text-lg font-black text-indigo-800">歷季平均服事次數</h3>
+                                </div>
+                                <div className="p-0 overflow-x-auto">
+                                    <table className="w-full text-left border-collapse min-w-[500px]">
+                                        <thead>
+                                            <tr className="bg-slate-50">
+                                                <th className="py-4 px-6 font-black text-slate-500 text-sm border-b border-slate-100 w-1/4">年/季</th>
+                                                <th className="py-4 px-6 font-black text-slate-500 text-sm border-b border-slate-100 text-center w-1/4">次數 (每人)</th>
+                                                <th className="py-4 px-6 font-black text-slate-500 text-sm border-b border-slate-100 text-center w-1/4">YoY(%)</th>
+                                                <th className="py-4 px-6 font-black text-slate-500 text-sm border-b border-slate-100 text-center w-1/4">MoM(%)</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {insights.quarterlyTable.length > 0 ? (
+                                                insights.quarterlyTable.map((d, i) => (
+                                                    <tr key={d.key} className="border-b border-slate-50 hover:bg-slate-50/50 transition-colors">
+                                                        <td className="py-4 px-6 font-black text-slate-800">{d.key}</td>
+                                                        <td className="py-4 px-6 text-center font-black text-slate-600">{d.avg.toFixed(1)} 次</td>
+                                                        <td className="py-4 px-6 text-center font-bold">
+                                                            {d.yoy !== null ? (
+                                                                <span className={d.yoy > 0 ? "text-rose-500" : (d.yoy < 0 ? "text-emerald-500" : "text-slate-400")}>
+                                                                    {d.yoy > 0 ? <ArrowUp size={14} className="inline mr-1"/> : (d.yoy < 0 ? <ArrowDown size={14} className="inline mr-1"/> : '')}
+                                                                    {Math.abs(d.yoy).toFixed(1)}%
+                                                                </span>
+                                                            ) : <span className="text-slate-300">-</span>}
+                                                        </td>
+                                                        <td className="py-4 px-6 text-center font-bold">
+                                                            {d.qoq !== null ? (
+                                                                <span className={d.qoq > 0 ? "text-rose-500" : (d.qoq < 0 ? "text-emerald-500" : "text-slate-400")}>
+                                                                    {d.qoq > 0 ? <ArrowUp size={14} className="inline mr-1"/> : (d.qoq < 0 ? <ArrowDown size={14} className="inline mr-1"/> : '')}
+                                                                    {Math.abs(d.qoq).toFixed(1)}%
+                                                                </span>
+                                                            ) : <span className="text-slate-300">-</span>}
+                                                        </td>
+                                                    </tr>
+                                                ))
+                                            ) : (
+                                                <tr>
+                                                    <td colSpan="4" className="text-center py-8 text-slate-400 font-bold">尚無排班數據</td>
+                                                </tr>
+                                            )}
+                                        </tbody>
+                                    </table>
                                 </div>
                             </div>
 
