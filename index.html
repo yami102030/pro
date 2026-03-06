@@ -1010,6 +1010,7 @@
             const [generatedDraft, setGeneratedDraft] = useState([]);
             const [errorMsg, setErrorMsg] = useState('');
             const [showSuccessToast, setShowSuccessToast] = useState(false);
+            const [availableQuarters, setAvailableQuarters] = useState([]); // 新增：儲存所有可用的季度
             
             const [activeSlot, setActiveSlot] = useState(null); 
             const [searchTerm, setSearchTerm] = useState('');
@@ -1029,10 +1030,50 @@
                             supabase.from('schedules').select('*').limit(10000), // 擴增抓取上限至一萬筆
                             supabase.from('member_quarter_settings').select('*')
                         ]);
+                        
                         setDbData({ 
                             members: members || [], positions: positions || [], memberPositions: memberPositions || [], 
                             existingSchedules: schedules || [], memberQuarterSettings: quarterSettings || []
                         });
+
+                        // 萃取所有現有排班資料的季度
+                        if (schedules) {
+                            const quartersSet = new Set();
+                            schedules.forEach(s => {
+                                if (s.service_date) {
+                                    const parts = s.service_date.includes('-') ? s.service_date.split('-') : s.service_date.split('/');
+                                    if (parts.length >= 2) {
+                                        const y = parseInt(parts[0], 10);
+                                        const m = parseInt(parts[1], 10);
+                                        const q = Math.ceil(m / 3);
+                                        quartersSet.add(`${y}-Q${q}`);
+                                    }
+                                }
+                            });
+                            
+                            // 合併基本季度（確保至少有當前和下一個季度可選）
+                            const baseQuarters = generateBaseQuarters();
+                            baseQuarters.forEach(q => quartersSet.add(q));
+
+                            // 將Set轉換為陣列並排序
+                            const sortedQuarters = Array.from(quartersSet).sort((a, b) => {
+                                const [yearA, qA] = a.split('-Q').map(Number);
+                                const [yearB, qB] = b.split('-Q').map(Number);
+                                if (yearA !== yearB) return yearB - yearA; // 年份大到小
+                                return qB - qA; // 季度大到小
+                            });
+                            
+                            setAvailableQuarters(sortedQuarters);
+
+                            // 如果目前的 queryYear/queryQuarter 不在列表中，嘗試設定為最新的一個
+                            const currentQueryStr = `${queryYear}-Q${queryQuarter}`;
+                            if (!sortedQuarters.includes(currentQueryStr) && sortedQuarters.length > 0) {
+                                const [y, q] = sortedQuarters[0].split('-Q').map(Number);
+                                setQueryYear(y);
+                                setQueryQuarter(q);
+                            }
+                        }
+
                     } catch (err) { setErrorMsg('讀取資料庫失敗。請確保網路連線。'); } 
                     finally { setIsLoading(false); }
                 };
@@ -1665,15 +1706,22 @@
                                 </div>
                                 {appMode === 'schedule' ? (
                                     <div className="animate-fade-in">
-                                        <div className="grid grid-cols-2 gap-6 mb-10">
+                                        <div className="grid grid-cols-1 gap-6 mb-10">
                                             <div className="space-y-2">
-                                                <label className="text-xs font-black text-slate-400 ml-2">年份</label>
-                                                <input type="number" value={year} onChange={e => setYear(parseInt(e.target.value))} className="w-full bg-slate-50 border border-slate-200 rounded-3xl px-6 py-5 font-bold focus:ring-4 focus:ring-indigo-50 focus:bg-white outline-none transition-all" />
-                                            </div>
-                                            <div className="space-y-2">
-                                                <label className="text-xs font-black text-slate-400 ml-2">季度</label>
-                                                <select value={quarter} onChange={e => setQuarter(parseInt(e.target.value))} className="w-full bg-slate-50 border border-slate-200 rounded-3xl px-6 py-5 font-bold focus:ring-4 focus:ring-indigo-50 focus:bg-white outline-none transition-all">
-                                                    <option value={1}>Q1 (1-3月)</option><option value={2}>Q2 (4-6月)</option><option value={3}>Q3 (7-9月)</option><option value={4}>Q4 (10-12月)</option>
+                                                <label className="text-xs font-black text-slate-400 ml-2">選擇季度</label>
+                                                <select 
+                                                    value={`${year}-Q${quarter}`} 
+                                                    onChange={e => {
+                                                        const [y, q] = e.target.value.split('-Q').map(Number);
+                                                        setYear(y);
+                                                        setQuarter(q);
+                                                    }} 
+                                                    className="w-full bg-slate-50 border border-slate-200 rounded-3xl px-6 py-5 font-bold focus:ring-4 focus:ring-indigo-50 focus:bg-white outline-none transition-all"
+                                                >
+                                                    {generateBaseQuarters().map(qStr => {
+                                                        const [y, q] = qStr.split('-Q');
+                                                        return <option key={qStr} value={qStr}>{y}年 Q{q}季</option>
+                                                    })}
                                                 </select>
                                             </div>
                                         </div>
@@ -1683,15 +1731,22 @@
                                     </div>
                                 ) : (
                                     <div className="animate-fade-in">
-                                        <div className="grid grid-cols-2 gap-6 mb-10">
+                                        <div className="grid grid-cols-1 gap-6 mb-10">
                                             <div className="space-y-2">
-                                                <label className="text-xs font-black text-slate-400 ml-2">年份</label>
-                                                <input type="number" value={queryYear} onChange={e => setQueryYear(parseInt(e.target.value))} className="w-full bg-slate-50 border border-slate-200 rounded-3xl px-6 py-5 font-bold focus:ring-4 focus:ring-indigo-50 focus:bg-white outline-none transition-all" />
-                                            </div>
-                                            <div className="space-y-2">
-                                                <label className="text-xs font-black text-slate-400 ml-2">季度</label>
-                                                <select value={queryQuarter} onChange={e => setQueryQuarter(parseInt(e.target.value))} className="w-full bg-slate-50 border border-slate-200 rounded-3xl px-6 py-5 font-bold focus:ring-4 focus:ring-indigo-50 focus:bg-white outline-none transition-all">
-                                                    <option value={1}>Q1 (1-3月)</option><option value={2}>Q2 (4-6月)</option><option value={3}>Q3 (7-9月)</option><option value={4}>Q4 (10-12月)</option>
+                                                <label className="text-xs font-black text-slate-400 ml-2">選擇要編輯的季度</label>
+                                                <select 
+                                                    value={`${queryYear}-Q${queryQuarter}`} 
+                                                    onChange={e => {
+                                                        const [y, q] = e.target.value.split('-Q').map(Number);
+                                                        setQueryYear(y);
+                                                        setQueryQuarter(q);
+                                                    }} 
+                                                    className="w-full bg-slate-50 border border-slate-200 rounded-3xl px-6 py-5 font-bold focus:ring-4 focus:ring-indigo-50 focus:bg-white outline-none transition-all"
+                                                >
+                                                    {availableQuarters.map(qStr => {
+                                                        const [y, q] = qStr.split('-Q');
+                                                        return <option key={qStr} value={qStr}>{y}年 Q{q}季</option>
+                                                    })}
                                                 </select>
                                             </div>
                                         </div>
