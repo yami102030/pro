@@ -1089,6 +1089,7 @@
 
             const [sortConfig, setSortConfig] = useState({ key: 'totalService', direction: 'desc' });
             const [selectedPersonalStats, setSelectedPersonalStats] = useState(null);
+            const [hasQuerySchedule, setHasQuerySchedule] = useState(true); // 新增：用來快速檢查編輯班表是否有資料
 
             // 輔助函數：計算該季度的起始與結束日期，用於精準抓取 schedules 表
             const getQuarterDateRange = (y, q) => {
@@ -1144,6 +1145,22 @@
                     }
                 }
             }, [viewMode]);
+
+            // 新增：當切換查詢年份/季度時，快速檢查是否已有排班資料
+            useEffect(() => {
+                const checkScheduleExists = async () => {
+                    if (appMode !== 'query') return;
+                    const dateRange = getQuarterDateRange(queryYear, queryQuarter);
+                    try {
+                        // 利用 .limit(1) 達到極致效能的檢查
+                        const { data } = await supabase.from('schedules').select('id').gte('service_date', dateRange.start).lte('service_date', dateRange.end).limit(1);
+                        setHasQuerySchedule(data && data.length > 0);
+                    } catch (e) {
+                        setHasQuerySchedule(true);
+                    }
+                };
+                checkScheduleExists();
+            }, [queryYear, queryQuarter, appMode]);
 
             const currentQuarterStr = `${year}-Q${quarter}`;
 
@@ -1204,6 +1221,14 @@
                     const [{ data: latestSchedules }] = await Promise.all([ 
                         fetchAllData(() => supabase.from('schedules').select('*').gte('service_date', dateRange.start).lte('service_date', dateRange.end)) 
                     ]);
+
+                    // 新增防呆：檢查是否有資料，若無則攔截進入編輯模式
+                    if (!latestSchedules || latestSchedules.length === 0) {
+                        setErrorMsg(`⚠️ 尚未建立 ${qY}Q${qQ} 排班資料，請至「預排作業」新增。`);
+                        setIsLoading(false);
+                        return;
+                    }
+
                     setDbData(prev => ({ ...prev, existingSchedules: latestSchedules || [] }));
 
                     const reconstructed = [];
@@ -1832,6 +1857,11 @@
                                         <button onClick={runQuerySchedule} disabled={isLoading} className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-300 text-white font-black py-5 rounded-2xl flex items-center justify-center gap-3 transition-all active:scale-95 shadow-xl shadow-indigo-200">
                                             {isLoading ? <RefreshCw className="animate-spin" /> : <><Search size={20} strokeWidth={3}/> 開始編輯</>}
                                         </button>
+                                        {!hasQuerySchedule && !isLoading && (
+                                            <p className="text-rose-500 text-[13px] font-bold text-center mt-4 flex items-center justify-center gap-1.5 animate-pulse">
+                                                <AlertCircle size={16} /> 尚未建立 {queryYear}Q{queryQuarter} 排班資料，請至「預排作業」新增。
+                                            </p>
+                                        )}
                                     </div>
                                 )}
                             </div>
